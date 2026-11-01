@@ -5,9 +5,18 @@ import signal
 import sys
 from pathlib import Path
 
-from . import audio, clean, config, extract, hardware, llm, server, transcribe, tts
+from . import audio, clean, config, document, extract, fetch, hardware, llm, readers, server, transcribe, tts
 
-SUPPORTED_INPUTS = (".pdf", ".txt", ".md")
+# Structured formats, read into labeled blocks (see readers.py)
+STRUCTURED_READERS = {
+    ".html": lambda path: readers.read_html(path.read_text(errors="replace")),
+    ".htm": lambda path: readers.read_html(path.read_text(errors="replace")),
+    ".xhtml": lambda path: readers.read_html(path.read_text(errors="replace")),
+    ".xml": lambda path: readers.read_jats(path.read_text(errors="replace")),
+    ".epub": readers.read_epub,
+    ".tex": readers.read_tex,
+}
+SUPPORTED_INPUTS = (".pdf", ".txt", ".md", *STRUCTURED_READERS)
 
 
 def main() -> None:
@@ -21,7 +30,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_sections_help(),
     )
-    convert.add_argument("--input", required=True, type=Path, help="file to read (.pdf, .txt or .md)")
+    convert.add_argument("--input", required=True,
+                         help="paper to read: a file (.pdf, .html, .xml, .epub, .tex, .txt, .md), a URL, "
+                              "a DOI or an arXiv ID like arxiv:1706.03762")
     convert.add_argument("--output", required=True, type=Path, help=f"audio file to write ({formats})")
     convert.add_argument("--speed", type=float, help="playback speed, e.g. 1.5 (default: 1)")
     convert.add_argument("--voice", help="phonon voice (default: Zoey)")
@@ -39,8 +50,6 @@ def main() -> None:
                          help=f"audio file to write ({formats}; default: next to the input, e.g. talk_1.5x.mp3)")
 
     args = parser.parse_args()
-    if not args.input.is_file():
-        parser.error(f"input file not found: {args.input}")
     if args.command == "convert":
         _convert(args, parser)
     else:
@@ -48,8 +57,6 @@ def main() -> None:
 
 
 def _convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    if args.input.suffix.lower() not in SUPPORTED_INPUTS:
-        parser.error(f"--input must end in one of {', '.join(SUPPORTED_INPUTS)}")
     _check_output(args.output, parser)
     try:
         settings = config.load()
@@ -66,10 +73,16 @@ def _convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda signum, frame: sys.exit(128 + signum))
     try:
+        path = fetch.resolve(args.input)
+    except fetch.FetchError as e:
+        sys.exit(f"Error: {e}")
+    if path.suffix.lower() not in SUPPORTED_INPUTS:
+        parser.error(f"--input must be one of {', '.join(SUPPORTED_INPUTS)}, a URL, a DOI or an arXiv ID")
+    try:
         with server.ollama_server():
-            text = _prepare_text(args.input, settings)
+            text = _prepare_text(path, settings)
             if not text:
-                hint = " (is it a scanned image?)" if args.input.suffix.lower() == ".pdf" else ""
+                hint = " (is it a scanned image?)" if path.suffix.lower() == ".pdf" else ""
                 sys.exit(f"No readable text found in {args.input}{hint}")
             result = tts.synthesize(text, settings.voice)
     except RuntimeError as e:
@@ -80,6 +93,8 @@ def _convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
 
 
 def _speedup(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if not args.input.is_file():
+        parser.error(f"input file not found: {args.input}")
     _check_speed(args.speed, parser)
     output = args.output or args.input.with_name(f"{args.input.stem}_{args.speed:g}x{args.input.suffix}")
     _check_output(output, parser)
@@ -110,14 +125,20 @@ def _prepare_text(path: Path, settings: config.Settings) -> str:
     """Read the input file and return cleaned, speakable text, one paragraph per line."""
     model = _choose_model(settings.llm_model)
     sections = settings.sections
+    suffix = path.suffix.lower()
     if model is None:
-        wanted = sorted(sections & config.LLM_ONLY_SECTIONS - ({"figures", "formulas"} if path.suffix != ".pdf" else set()))
+        # Structured formats mark figures, formulas, footnotes and appendices themselves.
+        needs_model = config.LLM_ONLY_SECTIONS if suffix == ".pdf" else {"summary"}
+        wanted = sorted(sections & needs_model)
         if wanted:
             print(f"Note: without a language model these sections can't be handled: {', '.join(wanted)}", file=sys.stderr)
     else:
         print(f"Using language model {model}", file=sys.stderr)
     try:
-        if path.suffix.lower() == ".pdf":
+        if suffix in STRUCTURED_READERS:
+            print(f"Reading {path}...", file=sys.stderr)
+            text = document.to_speech(STRUCTURED_READERS[suffix](path), sections, model)
+        elif suffix == ".pdf":
             if model:
                 text = transcribe.transcribe_pdf(path, model, sections)
             else:
@@ -126,7 +147,7 @@ def _prepare_text(path: Path, settings: config.Settings) -> str:
         else:
             print(f"Reading {path}...", file=sys.stderr)
             raw = path.read_text(encoding="utf-8", errors="replace")
-            text = clean.clean_markdown(raw, sections) if path.suffix.lower() == ".md" else clean.clean_text(raw, sections)
+            text = clean.clean_markdown(raw, sections) if suffix == ".md" else clean.clean_text(raw, sections)
         if model and text and "summary" in sections:
             text = f"Summary: {transcribe.summarize(text, model)}\nNow the paper itself.\n{text}"
     finally:
