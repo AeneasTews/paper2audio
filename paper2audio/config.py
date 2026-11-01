@@ -4,6 +4,7 @@ The config file lives at $XDG_CONFIG_HOME/paper2audio/config.toml (usually
 ~/.config/paper2audio/config.toml), for example:
 
     voice = "Zoey"
+    speed = 1.5                # playback speed
     llm_model = "gemma4:12b"   # or "none" to always use the rule-based cleanup
 
     [sections]
@@ -37,6 +38,7 @@ LLM_ONLY_SECTIONS = {"figures", "formulas", "footnotes", "appendix", "summary"}
 @dataclass
 class Settings:
     voice: str = "Zoey"
+    speed: float = 1.0
     llm_model: str | None = None  # None: pick automatically; "none": don't use a language model
     sections: set[str] = field(default_factory=lambda: {name for name, (on, _) in SECTIONS.items() if on})
 
@@ -56,10 +58,13 @@ def load(path: Path | None = None) -> Settings:
         data = tomllib.loads(path.read_text())
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"{path}: {e}") from None
-    unknown = set(data) - {"voice", "llm_model", "sections"}
+    unknown = set(data) - {"voice", "speed", "llm_model", "sections"}
     if unknown:
         raise ValueError(f"{path}: unknown setting(s): {', '.join(sorted(unknown))}")
     settings.voice = data.get("voice", settings.voice)
+    settings.speed = data.get("speed", settings.speed)
+    if isinstance(settings.speed, bool) or not isinstance(settings.speed, int | float):
+        raise ValueError(f"{path}: speed must be a number, e.g. 1.5")
     settings.llm_model = data.get("llm_model", settings.llm_model)
     for name, enabled in data.get("sections", {}).items():
         _check_section(name, path)

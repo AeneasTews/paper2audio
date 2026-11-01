@@ -5,7 +5,7 @@ Turn scientific papers into audio files, so you can listen to them while cycling
 paper2audio reads a PDF, plain text or Markdown file and turns it into speech with [ollama](https://ollama.com)'s **phonon** model. For PDFs, a local language model (Gemma 4 by default) looks at each page and writes out what should be spoken: formulas in words, figures and tables described, headers, page numbers and citations left out. You choose which parts of the paper you want to hear. Everything runs locally.
 
 ```sh
-paper2audio convert --input=paper.pdf --output=paper.mp3
+paper2audio convert --input=paper.pdf --output=paper.mp3 --speed=1.5
 ```
 
 ## Requirements
@@ -48,9 +48,12 @@ Any other ollama model works too, with `--llm-model` or in the config file. Mode
 ## Usage
 
 ```sh
-# MP3 (small files, good for phones) or WAV
+# Any common audio format: .mp3, .m4a, .opus, .ogg, .flac, .wav, .aiff
 paper2audio convert --input=paper.pdf --output=paper.mp3
-paper2audio convert --input=paper.pdf --output=paper.wav
+paper2audio convert --input=paper.pdf --output=paper.opus
+
+# Faster (or slower) playback, without the voice getting higher
+paper2audio convert --input=paper.pdf --output=paper.mp3 --speed=1.5
 
 # Plain text and Markdown work too
 paper2audio convert --input=notes.txt --output=notes.mp3
@@ -67,12 +70,22 @@ paper2audio convert --input=paper.pdf --output=paper.mp3 --no-llm
 | Option | Description |
 | --- | --- |
 | `--input` | File to read: `.pdf`, `.txt` or `.md` (required) |
-| `--output` | Audio file to write, `.mp3` or `.wav` (required) |
+| `--output` | Audio file to write: `.mp3`, `.m4a`, `.opus`, `.ogg`, `.flac`, `.wav` or `.aiff` (required) |
+| `--speed` | Playback speed from 0.5 to 4, e.g. `1.5` (default: 1) |
 | `--voice` | phonon voice (default: `Zoey`) |
 | `--llm-model` | ollama model that reads the pages (default: the one recommended for this machine, if installed) |
 | `--no-llm` | Don't use a language model, only the rule-based cleanup |
 | `--include` | Comma-separated sections to read in addition to the defaults |
 | `--exclude` | Comma-separated sections to leave out |
+
+### Changing the speed of an existing file
+
+```sh
+paper2audio speedup --input=paper.mp3 --speed=1.5                       # writes paper_1.5x.mp3
+paper2audio speedup --input=lecture.m4a --speed=1.25 --output=lecture.opus
+```
+
+The input can be any audio file ffmpeg can read; the output can be any of the formats above. Each speed change is applied to already-encoded audio, so for the best quality set `--speed` when converting instead of speeding up a file several times.
 
 ### Sections
 
@@ -98,6 +111,7 @@ Defaults for every run go in `~/.config/paper2audio/config.toml` (or `$XDG_CONFI
 
 ```toml
 voice = "Zoey"
+speed = 1.5
 llm_model = "gemma4:12b"   # or "none"
 
 [sections]
@@ -122,7 +136,7 @@ With `gemma4:26b` or `gemma4:12b` on an M-series Mac, each page takes roughly 10
    - rejoins hyphenated words and glues lines back into paragraphs
    - strips Markdown syntax and skips code blocks; list items and table rows are read one at a time
 5. **Speak** (`tts.py`): sends the text to `ollama run phonon` in chunks of about 4,000 characters and stitches the audio together. If phonon rejects a chunk, that chunk is skipped instead of failing the whole run.
-6. **Save** (`audio.py`): writes WAV, or encodes MP3 at 64 kbps with [lameenc](https://github.com/chrisstaite/lameenc). ffmpeg is not needed.
+6. **Save** (`audio.py`): applies the speed with ffmpeg's `atempo` filter, which keeps the pitch of the voice, and encodes the chosen format (64 kbps for MP3/AAC, 32 kbps Opus, lossless FLAC/WAV/AIFF). This uses [PyAV](https://pyav.basswood-io.com), which bundles ffmpeg's libraries, so ffmpeg doesn't need to be installed. phonon has no speed setting of its own (ollama only accepts speed 1).
 
 ## Known limitations
 

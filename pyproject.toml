@@ -5,9 +5,9 @@ description = "Turn scientific papers (PDF) into audio files using ollama's phon
 requires-python = ">=3.11"  # tomllib
 dependencies = [
     "pypdf>=5",
-    "lameenc>=1.7",
     "pillow>=10",
     "pypdfium2>=5.14.0",
+    "av>=18.1.0",
 ]
 
 [project.scripts]
