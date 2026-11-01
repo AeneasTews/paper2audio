@@ -27,12 +27,13 @@ From the project folder:
 ```sh
 ./setup.sh            # asks which language model to download
 ./setup.sh gemma4:12b # or name one directly ("none" for no language model)
+./setup.sh --no-gui   # only the command-line tool, without the desktop app
 ```
 
 The script is safe to re-run; anything already set up is skipped. It:
 
 1. installs ollama with the [official installer](https://ollama.com/download) if the `ollama` command isn't found
-2. starts the ollama server if it isn't running
+2. if no ollama server is running, starts a temporary one for the downloads and stops it again at the end (a server that's already running, like the Ollama app, is left alone)
 3. installs uv with its official installer if it's missing
 4. installs the `paper2audio` and `paper2audio-gui` commands (`uv tool install --editable '.[gui]'`), so changes to the code take effect immediately
 5. downloads the `phonon` speech model and the language model

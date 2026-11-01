@@ -2,20 +2,31 @@
 # Set up everything paper2audio needs: ollama, uv, the paper2audio command, and the
 # phonon speech and language models. Safe to re-run; steps that are already done are skipped.
 #
-# Usage: ./setup.sh [--no-command] [MODEL]
+# Usage: ./setup.sh [--no-gui] [--no-command] [MODEL]
 #   MODEL         language model to download (default: recommended for this machine,
 #                 asked interactively), or "none"
-#   --no-command  skip uv and the paper2audio command (used by the GUI's setup dialog,
+#   --no-gui      install only the paper2audio command, without the desktop app and its
+#                 dependencies (NiceGUI, pywebview)
+#   --no-command  skip uv and the paper2audio commands (used by the GUI's setup dialog,
 #                 which must not reinstall itself while it runs). Set PAPER2AUDIO_PYTHON
 #                 to a Python that has paper2audio installed to run its helpers without uv.
+#
+# If no ollama server is running, a temporary one is started for the downloads and
+# stopped again at the end. A server that's already running is used and left alone.
 set -eu
 cd "$(dirname "$0")"
 
 INSTALL_COMMAND=1
-if [ "${1:-}" = "--no-command" ]; then
-    INSTALL_COMMAND=0
+INSTALL_GUI=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-command) INSTALL_COMMAND=0 ;;
+        --no-gui) INSTALL_GUI=0 ;;
+        -*) echo "ERROR: unknown option $1" >&2; exit 2 ;;
+        *) break ;;
+    esac
     shift
-fi
+done
 # Runs Python with paper2audio installed (a function, so a path with spaces works).
 run_python() {
     if [ -n "${PAPER2AUDIO_PYTHON:-}" ]; then
@@ -34,17 +45,28 @@ if available ollama; then
     status "ollama is already installed ($(ollama --version 2>/dev/null | tail -n 1))"
 else
     status "Installing ollama with the official installer..."
-    curl -fsSL https://ollama.com/install.sh | sh
+    # OLLAMA_NO_START: on macOS, don't launch the Ollama app afterwards; it would keep running.
+    curl -fsSL https://ollama.com/install.sh | OLLAMA_NO_START=1 sh
 fi
 
-# 2. Make sure the ollama server is running.
-if ! ollama list >/dev/null 2>&1; then
-    status "Starting ollama..."
-    if [ "$(uname -s)" = "Darwin" ]; then
-        open -a Ollama --args hidden
-    else
-        nohup ollama serve >/dev/null 2>&1 &
+# 2. An ollama server for the downloads. If none is running, start a temporary one and
+#    stop exactly that one when the script ends (also on Ctrl+C, or when the GUI's setup
+#    dialog cancels). A server that was already running is never stopped.
+SERVER_PID=
+stop_server() {
+    if [ -n "$SERVER_PID" ]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+        SERVER_PID=
     fi
+}
+trap stop_server EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! ollama list >/dev/null 2>&1; then
+    status "Starting a temporary ollama server..."
+    ollama serve >/dev/null 2>&1 &
+    SERVER_PID=$!
     i=0
     until ollama list >/dev/null 2>&1; do
         i=$((i + 1))
@@ -65,8 +87,13 @@ if [ "$INSTALL_COMMAND" = 1 ]; then
     fi
 
     # 4. The paper2audio and paper2audio-gui commands (editable, so code changes apply immediately).
-    status "Installing the paper2audio and paper2audio-gui commands..."
-    uv tool install --editable ".[gui]" --force --quiet
+    if [ "$INSTALL_GUI" = 1 ]; then
+        status "Installing the paper2audio and paper2audio-gui commands..."
+        uv tool install --editable ".[gui]" --force --quiet
+    else
+        status "Installing the paper2audio command (without the desktop app)..."
+        uv tool install --editable . --force --quiet
+    fi
 fi
 
 # 5. The models: phonon for speech, and a language model that reads the pages.
@@ -110,4 +137,8 @@ fi
 if [ "$INSTALL_COMMAND" = 1 ] && ! available paper2audio; then
     status "Note: run 'uv tool update-shell' and restart your terminal to put paper2audio on your PATH."
 fi
-status "Setup complete. Try: paper2audio convert --input=paper.pdf --output=paper.mp3, or paper2audio-gui"
+if [ "$INSTALL_COMMAND" = 1 ] && [ "$INSTALL_GUI" = 1 ]; then
+    status "Setup complete. Try: paper2audio convert --input=paper.pdf --output=paper.mp3, or paper2audio-gui"
+else
+    status "Setup complete. Try: paper2audio convert --input=paper.pdf --output=paper.mp3"
+fi
