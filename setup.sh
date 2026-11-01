@@ -1,9 +1,9 @@
 #!/bin/sh
-# Set up everything paper2audio needs: ollama, the phonon model, uv, and the
+# Set up everything paper2audio needs: ollama, the phonon and vision models, uv, and the
 # paper2audio command itself. Safe to re-run; steps that are already done are skipped.
 set -eu
 
-MODEL=phonon
+MODELS="phonon gemma3"  # speech, and the vision model that describes figures
 cd "$(dirname "$0")"
 
 status() { echo ">>> $*"; }
@@ -37,13 +37,15 @@ if ! ollama list >/dev/null 2>&1; then
     done
 fi
 
-# 3. The phonon speech model.
-if ollama list | awk 'NR > 1 { print $1 }' | grep -q "^$MODEL:"; then
-    status "$MODEL model is already available"
-else
-    status "Downloading the $MODEL model..."
-    ollama pull "$MODEL"
-fi
+# 3. The phonon speech model and the vision model.
+for MODEL in $MODELS; do
+    if ollama list | awk 'NR > 1 { print $1 }' | grep -q "^$MODEL:"; then
+        status "$MODEL model is already available"
+    else
+        status "Downloading the $MODEL model..."
+        ollama pull "$MODEL"
+    fi
+done
 
 # 4. uv, used to install the Python package.
 if ! available uv; then

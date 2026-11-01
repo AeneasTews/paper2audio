@@ -52,13 +52,13 @@ def _wait_until_running(process: subprocess.Popen) -> None:
 
 def _is_running() -> bool:
     try:
-        with urllib.request.urlopen(_server_url(), timeout=1) as response:
+        with urllib.request.urlopen(server_url(), timeout=1) as response:
             return response.status == 200
     except OSError:
         return False
 
 
-def _server_url() -> str:
+def server_url() -> str:
     """Server address, following ollama's OLLAMA_HOST conventions (default 127.0.0.1:11434)."""
     host = os.environ.get("OLLAMA_HOST", "").strip() or "127.0.0.1:11434"
     scheme, sep, rest = host.partition("://")
