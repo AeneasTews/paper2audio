@@ -10,13 +10,29 @@ from .config import Settings
 
 # A line that starts the reference list, e.g. "References" or "7 Bibliography".
 REFERENCES_HEADING = re.compile(r"^\s*(\d+\.?\s*)?(references|bibliography)\s*$", re.IGNORECASE)
-# Numeric citations: [13], [ 35, 2, 5], [1–5]
-CITATION = re.compile(r"\s*\[\s*\d+(\s*[,–-]\s*\d+)*\s*\]")
+# In-text citations:
+#   numeric:      [13], [ 35, 2, 5], [1–5]
+#   alphanumeric: [Shl00b], [DPR61, Mat70], [Shl00b, Theorem 2]
+#   author-year:  (Smith et al., 2020), (Smith and Jones 2019; Lee 2020a), (see Smith, 2020)
+CITATION_KEY = r"[A-Z][A-Za-z+\-]{0,6}\d{2,4}[a-z]?"
+AUTHOR_YEAR = r"[A-Z][\w'\-]+(?:\s+(?:et\s+al\.?|and|&)(?:\s+[A-Z][\w'\-]+)?)?,?\s+(?:19|20)\d{2}[a-z]?"
+CITATION = re.compile(
+    r"\s*\[\s*[1-9]\d*(\s*[,–-]\s*\d+)*\s*\]"  # numbered references start at 1: [0, 1] is an interval
+    rf"|\s*\[{CITATION_KEY}(?:\s*[,;]\s*{CITATION_KEY})*(?:\s*,\s*[^\]\[]{{1,40}})?\]"
+    rf"|\s*\((?:see\s+|e\.g\.,?\s+)?{AUTHOR_YEAR}(?:\s*[;,]\s*{AUTHOR_YEAR})*\)"
+)
 URL = re.compile(r"(https?://|www\.)\S+?(?=[.,;:!?)]*(\s|$))")  # keep trailing punctuation
+# After these words a citation is part of the sentence ("as shown in [12]"), so it's
+# replaced with words instead of being removed.
+CITATION_AS_NOUN = re.compile(r"\b(of|in|from|see|by|cf\.?|and|to|with|following|per|also)\s*$", re.IGNORECASE)
 EMAIL = re.compile(r"\S+@\S+\.\S+")
 SENTENCE_END = (".", "!", "?", ":")
 # "Abstract" as a heading of its own, or at the start of the abstract paragraph.
 ABSTRACT_HEADING = re.compile(r"^\s*abstract\b", re.IGNORECASE)
+DECLARATIONS_HEADING = re.compile(
+    r"^\s*(\d+\.?\s*)?(funding|financial disclosure|competing interests?|conflicts? of interests?|declaration of"
+    r"|author contributions?|data availability|code availability|availability of data)\b", re.IGNORECASE)
+KEYWORDS = re.compile(r"^\s*(key\s?words|index terms)\b", re.IGNORECASE)
 ACKNOWLEDGEMENTS_HEADING = re.compile(r"^\s*(\d+\.?\s*)?acknowledge?ments?\b", re.IGNORECASE)
 # A paragraph this short that matches a heading pattern is the heading alone.
 MAX_HEADING_LENGTH = 40
@@ -99,19 +115,22 @@ def _select_sections(paragraphs: list[str], sections: Collection[str]) -> list[s
             + (rest[:abstract_length] if "abstract" in sections else [])
             + rest[abstract_length:]
         )
-    if "acknowledgements" not in sections:
-        paragraphs = _drop_acknowledgements(paragraphs)
+    for name, heading in (("acknowledgements", ACKNOWLEDGEMENTS_HEADING), ("declarations", DECLARATIONS_HEADING),
+                          ("keywords", KEYWORDS)):
+        if name not in sections:
+            paragraphs = _drop_headed(paragraphs, heading)
     return paragraphs
 
 
-def _drop_acknowledgements(paragraphs: list[str]) -> list[str]:
+def _drop_headed(paragraphs: list[str], heading: re.Pattern) -> list[str]:
+    """Drop paragraphs starting with a heading like "Acknowledgements", and the next one if it's just the heading."""
     result = []
     skip_next = False
     for paragraph in paragraphs:
         if skip_next:
             skip_next = False
-        elif ACKNOWLEDGEMENTS_HEADING.match(paragraph):
-            skip_next = len(paragraph) <= MAX_HEADING_LENGTH  # heading alone: the text follows
+        elif heading.match(paragraph):
+            skip_next = not heading.sub("", paragraph).strip(" .:")  # heading alone: the text follows
         else:
             result.append(paragraph)
     return result
@@ -151,9 +170,18 @@ def _cut_references(lines: list[str]) -> list[str]:
     return lines
 
 
+def remove_citations(text: str) -> str:
+    def replace(match: re.Match) -> str:
+        if not CITATION_AS_NOUN.search(text[:match.start()]):
+            return ""
+        several = re.search(r"[,;–-]", match.group().strip("[]() "))
+        return " the cited works" if several else " the cited work"
+    return CITATION.sub(replace, text)
+
+
 def _clean_line(line: str, keep_citations: bool) -> str:
     if not keep_citations:
-        line = CITATION.sub("", line)
+        line = remove_citations(line)
     line = URL.sub("", line)
     line = EMAIL.sub("", line)
     line = re.sub(r"[∗†‡§¶]", "", line)  # footnote / affiliation markers

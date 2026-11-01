@@ -35,7 +35,11 @@ Extracted text:
 # Prompt rules for each section, depending on whether the listener wants it.
 SECTION_RULES = {
     "title": (None, "Leave out the paper's title."),
-    "authors": (None, "Leave out author names, affiliations, email addresses and notes about the authors."),
+    "authors": (None, "Leave out author names, affiliations, email addresses and notes about the authors, such as "
+                "corresponding author or equal contribution."),
+    "keywords": (None, "Leave out the keywords list."),
+    "metadata": (None, "Leave out publication metadata: article type (e.g. \"Full Research Paper\"), journal "
+                 "name, volume and pages, dates received, accepted and published, DOI, license and copyright notices."),
     "abstract": (None, "Leave out the abstract."),
     "formulas": (
         'Write every formula and math symbol as natural spoken English, e.g. "Q K transpose '
@@ -61,6 +65,8 @@ SECTION_RULES = {
         "that are part of the sentence.",
     ),
     "acknowledgements": (None, "Leave out the acknowledgements."),
+    "declarations": (None, "Leave out declarations: funding, competing interests, author contributions, and data "
+                     "or code availability statements."),
     "references": (
         "Read the reference list as plain text, one entry per line.",
         "Leave out the reference list or bibliography entirely.",

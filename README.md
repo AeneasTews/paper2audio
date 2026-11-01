@@ -112,13 +112,16 @@ The input can be any audio file ffmpeg can read; the output can be any of the fo
 | Section | Default | What it is |
 | --- | --- | --- |
 | `title` | on | The paper's title |
-| `authors` | off | Authors and affiliations |
+| `authors` | off | Authors, affiliations, and notes like "corresponding author" |
+| `keywords` | off | The keywords list |
+| `metadata` | off | Article type, journal, dates, DOI, license |
 | `abstract` | on | The abstract |
 | `figures` | on | Spoken descriptions of figures and tables |
 | `formulas` | on | Formulas, spoken in words |
 | `footnotes` | on | Footnotes |
-| `citations` | off | In-text citations like [12] or (Smith et al., 2020) |
+| `citations` | off | In-text citations like [12], [Shl00b] or (Smith et al., 2020). When left out, a citation that's part of the sentence is read as "the cited work": "as shown in [12]" → "as shown in the cited work" |
 | `acknowledgements` | off | The acknowledgements |
+| `declarations` | off | Funding, competing interests, author contributions, data availability |
 | `references` | off | The reference list |
 | `appendix` | off | Everything after the reference list |
 | `summary` | off | A short generated summary, read before the paper |
