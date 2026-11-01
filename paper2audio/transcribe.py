@@ -5,11 +5,11 @@ person would, and gets the text extracted by pypdf as a reference for the exact 
 """
 
 import math
-import sys
 from collections.abc import Collection
 from pathlib import Path
 
 from . import clean, extract, llm
+from .progress import Progress, print_progress
 
 PROMPT = """\
 You are preparing a page of a scientific paper to be read aloud by a text-to-speech \
@@ -110,32 +110,32 @@ Paper:
 {text}"""
 
 
-def transcribe_pdf(pdf_path: Path, model: str, sections: Collection[str]) -> str:
+def transcribe_pdf(pdf_path: Path, model: str, sections: Collection[str], progress: Progress = print_progress) -> str:
     """Return the speakable text of the paper. Returns one paragraph per line."""
     pages = [clean.normalize(text) for text in extract.extract_pages(pdf_path)]
     page_count = _pages_to_read(pages, sections)
     vision = "vision" in llm.capabilities(model)
     if not vision:
-        print(f"Note: {model} can't read images, so figures can't be described", file=sys.stderr)
+        progress(f"Note: {model} can't read images, so figures can't be described", None)
     intro, prompt_rules = (INTRO_VISION if vision else INTRO_TEXT), _rules(sections, vision)
     paragraphs: list[str] = []
     for i in range(page_count):
-        print(f"Transcribing page {i + 1}/{page_count}...", file=sys.stderr)
+        progress(f"Transcribing page {i + 1}/{page_count}...", i / page_count)
         context = CONTEXT.format(tail=paragraphs[-1][-CONTEXT_CHARS:]) if paragraphs else ""
         prompt = PROMPT.format(intro=intro, rules=prompt_rules, context=context, text=pages[i])
         images = [extract.render_page(pdf_path, i)] if vision else []
         output = llm.generate(model, prompt, images=images)
         if len(output) < MIN_OUTPUT_RATIO * len(pages[i]):
-            print("  output looks incomplete, retrying", file=sys.stderr)
+            progress("  output looks incomplete, retrying", None)
             retry = llm.generate(model, prompt + RETRY_REMINDER, images=images)
             output = max(output, retry, key=len)
         _append_page(paragraphs, clean.clean_markdown(output, sections).splitlines())
     return "\n".join(paragraphs)
 
 
-def summarize(text: str, model: str) -> str:
+def summarize(text: str, model: str, progress: Progress = print_progress) -> str:
     """A short spoken summary of the paper, as one paragraph."""
-    print("Writing summary...", file=sys.stderr)
+    progress("Writing summary...", None)
     # Room for the paper (roughly 3 characters per token) plus the answer, in steps of 8K.
     num_ctx = 8192 * math.ceil((len(text) / 3 + 2048) / 8192)
     summary = llm.generate(model, SUMMARY_PROMPT.format(text=text), num_ctx=num_ctx)

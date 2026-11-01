@@ -5,18 +5,7 @@ import signal
 import sys
 from pathlib import Path
 
-from . import audio, clean, config, document, extract, fetch, hardware, llm, readers, server, transcribe, tts
-
-# Structured formats, read into labeled blocks (see readers.py)
-STRUCTURED_READERS = {
-    ".html": lambda path: readers.read_html(path.read_text(errors="replace")),
-    ".htm": lambda path: readers.read_html(path.read_text(errors="replace")),
-    ".xhtml": lambda path: readers.read_html(path.read_text(errors="replace")),
-    ".xml": lambda path: readers.read_jats(path.read_text(errors="replace")),
-    ".epub": readers.read_epub,
-    ".tex": readers.read_tex,
-}
-SUPPORTED_INPUTS = (".pdf", ".txt", ".md", *STRUCTURED_READERS)
+from . import audio, config, pipeline, tts
 
 
 def main() -> None:
@@ -73,23 +62,12 @@ def _convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda signum, frame: sys.exit(128 + signum))
     try:
-        path = fetch.resolve(args.input)
-    except fetch.FetchError as e:
-        sys.exit(f"Error: {e}")
-    if path.suffix.lower() not in SUPPORTED_INPUTS:
-        parser.error(f"--input must be one of {', '.join(SUPPORTED_INPUTS)}, a URL, a DOI or an arXiv ID")
-    try:
-        with server.ollama_server():
-            text = _prepare_text(path, settings)
-            if not text:
-                hint = " (is it a scanned image?)" if path.suffix.lower() == ".pdf" else ""
-                sys.exit(f"No readable text found in {args.input}{hint}")
-            result = tts.synthesize(text, settings.voice)
+        path = pipeline.resolve(args.input)
+        pipeline.convert(path, args.output, settings)
     except RuntimeError as e:
         sys.exit(f"Error: {e}")
     except KeyboardInterrupt:
         sys.exit("Interrupted")
-    _save(audio.change_speed(result, settings.speed), args.output)
 
 
 def _speedup(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -119,65 +97,6 @@ def _check_output(path: Path, parser: argparse.ArgumentParser) -> None:
 def _check_speed(speed: float, parser: argparse.ArgumentParser) -> None:
     if not audio.MIN_SPEED <= speed <= audio.MAX_SPEED:
         parser.error(f"speed must be between {audio.MIN_SPEED:g} and {audio.MAX_SPEED:g}")
-
-
-def _prepare_text(path: Path, settings: config.Settings) -> str:
-    """Read the input file and return cleaned, speakable text, one paragraph per line."""
-    model = _choose_model(settings.llm_model)
-    sections = settings.sections
-    suffix = path.suffix.lower()
-    if model is None:
-        # Structured formats mark figures, formulas, footnotes and appendices themselves.
-        needs_model = config.LLM_ONLY_SECTIONS if suffix == ".pdf" else {"summary"}
-        wanted = sorted(sections & needs_model)
-        if wanted:
-            print(f"Note: without a language model these sections can't be handled: {', '.join(wanted)}", file=sys.stderr)
-    else:
-        print(f"Using language model {model}", file=sys.stderr)
-    try:
-        if suffix in STRUCTURED_READERS:
-            print(f"Reading {path}...", file=sys.stderr)
-            text = document.to_speech(STRUCTURED_READERS[suffix](path), sections, model)
-        elif suffix == ".pdf":
-            if model:
-                text = transcribe.transcribe_pdf(path, model, sections)
-            else:
-                print(f"Extracting text from {path}...", file=sys.stderr)
-                text = clean.clean_pages(extract.extract_pages(path), sections)
-        else:
-            print(f"Reading {path}...", file=sys.stderr)
-            raw = path.read_text(encoding="utf-8", errors="replace")
-            text = clean.clean_markdown(raw, sections) if suffix == ".md" else clean.clean_text(raw, sections)
-        if model and text and "summary" in sections:
-            text = f"Summary: {transcribe.summarize(text, model)}\nNow the paper itself.\n{text}"
-    finally:
-        if model:
-            llm.unload(model)  # free the memory for phonon
-    return text
-
-
-def _choose_model(requested: str | None) -> str | None:
-    """The language model to use, or None for the rule-based cleanup."""
-    if requested == "none":
-        return None
-    installed = llm.installed_models()
-    if requested:
-        if requested not in installed:
-            raise RuntimeError(f"model {requested!r} is not installed. Run 'ollama pull {requested}' or use --no-llm")
-        if "completion" not in llm.capabilities(requested):
-            raise RuntimeError(f"model {requested!r} can't generate text, pick a language model")
-        return requested
-    recommended = hardware.recommended_model()
-    if recommended is None:
-        print("Note: not enough memory for a language model, using the rule-based cleanup", file=sys.stderr)
-        return None
-    # The recommended model, or a smaller one if only that is installed.
-    candidates = hardware.MODELS[hardware.MODELS.index(recommended):]
-    model = next((m for m in candidates if m in installed), None)
-    if model is None:
-        print(f"Note: no language model installed (run 'ollama pull {recommended}' or setup.sh), "
-              "using the rule-based cleanup", file=sys.stderr)
-    return model
 
 
 def _names(value: str) -> list[str]:

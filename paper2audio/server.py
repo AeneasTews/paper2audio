@@ -2,16 +2,17 @@
 
 import os
 import subprocess
-import sys
 import time
 import urllib.request
 from contextlib import contextmanager
+
+from .progress import Progress, print_progress
 
 STARTUP_TIMEOUT = 30  # seconds
 
 
 @contextmanager
-def ollama_server():
+def ollama_server(progress: Progress = print_progress):
     """Use the running ollama server, or start `ollama serve` and stop it again afterwards.
 
     Starting the server ourselves also matters on macOS: if `ollama run` finds no server,
@@ -21,7 +22,7 @@ def ollama_server():
         yield
         return
 
-    print("Starting ollama server...", file=sys.stderr)
+    progress("Starting ollama server...", None)
     process = subprocess.Popen(
         ["ollama", "serve"],
         stdout=subprocess.DEVNULL,
@@ -31,13 +32,18 @@ def ollama_server():
         _wait_until_running(process)
         yield
     finally:
-        print("Stopping ollama server...", file=sys.stderr)
+        # Stop the server before reporting it: the progress callback may raise (the GUI
+        # cancels that way), and the server must be stopped regardless.
         process.terminate()
         try:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+        try:
+            progress("Stopped ollama server", None)
+        except Exception:
+            pass
 
 
 def _wait_until_running(process: subprocess.Popen) -> None:

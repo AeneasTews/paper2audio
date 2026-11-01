@@ -12,11 +12,12 @@ Downloads are cached in ~/.cache/paper2audio.
 import json
 import os
 import re
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+from .progress import Progress, print_progress
 
 USER_AGENT = "paper2audio/0.1 (+https://github.com/AeneasTews/paper2audio)"
 TIMEOUT = 60  # seconds
@@ -36,26 +37,26 @@ class FetchError(Exception):
     pass
 
 
-def resolve(source: str) -> Path:
+def resolve(source: str, progress: Progress = print_progress) -> Path:
     """A local file for the input: the file itself, or a download of the paper."""
     path = Path(source).expanduser()
     if path.is_file():
         return path
     if match := ARXIV.match(source.strip()):
-        return _arxiv(match.group(1))
+        return _arxiv(match.group(1), progress)
     if match := DOI.match(source.strip()):
-        return _doi(match.group(1))
+        return _doi(match.group(1), progress)
     if source.startswith(("http://", "https://")):
-        return _url(source)
+        return _url(source, progress)
     raise FetchError(f"{source!r} is not a file, URL, DOI or arXiv ID")
 
 
-def _arxiv(arxiv_id: str) -> Path:
+def _arxiv(arxiv_id: str, progress: Progress) -> Path:
     for url in (f"https://arxiv.org/html/{arxiv_id}", f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}"):
         cached = _cache_path(f"arxiv-{arxiv_id}", ".html")
         if cached.exists():
             return cached
-        print(f"Downloading {url}...", file=sys.stderr)
+        progress(f"Downloading {url}...", None)
         try:
             body, _, final_url = _get(url)
         except FetchError:
@@ -67,12 +68,12 @@ def _arxiv(arxiv_id: str) -> Path:
             return cached
     if (cached := _cache_path(f"arxiv-{arxiv_id}", ".pdf")).exists():
         return cached
-    return _download(f"https://arxiv.org/pdf/{arxiv_id}", f"arxiv-{arxiv_id}")
+    return _download(f"https://arxiv.org/pdf/{arxiv_id}", f"arxiv-{arxiv_id}", progress)
 
 
-def _doi(doi: str) -> Path:
+def _doi(doi: str, progress: Progress) -> Path:
     if match := ARXIV_DOI.match(doi):
-        return _arxiv(match.group(1))
+        return _arxiv(match.group(1), progress)
     name = "doi-" + re.sub(r"[^\w.-]", "_", doi)
     for suffix in (".xml", ".pdf"):
         if (cached := _cache_path(name, suffix)).exists():
@@ -87,21 +88,21 @@ def _doi(doi: str) -> Path:
         results = []
     for result in results:
         if result.get("pmcid") and result.get("isOpenAccess") == "Y":
-            print(f"Downloading {result['pmcid']} from Europe PMC...", file=sys.stderr)
+            progress(f"Downloading {result['pmcid']} from Europe PMC...", None)
             body, _, _ = _get(f"https://www.ebi.ac.uk/europepmc/webservices/rest/{result['pmcid']}/fullTextXML")
             cached = _cache_path(name, ".xml")
             cached.write_bytes(body)
             return cached
 
     # Otherwise the publisher's page, which usually links its PDF in a citation_pdf_url tag.
-    print(f"Looking up https://doi.org/{doi}...", file=sys.stderr)
+    progress(f"Looking up https://doi.org/{doi}...", None)
     body, content_type, final_url = _get(f"https://doi.org/{doi}")
     if body.startswith(b"%PDF"):
         return _save(body, name, ".pdf")
     html = body.decode("utf-8", errors="replace")
     if match := PDF_META.search(html) or PDF_META_REVERSED.search(html):
         pdf_url = urllib.parse.urljoin(final_url, match.group(1))
-        print(f"Downloading {pdf_url}...", file=sys.stderr)
+        progress(f"Downloading {pdf_url}...", None)
         try:
             body, _, _ = _get(pdf_url)
         except FetchError:
@@ -114,13 +115,13 @@ def _doi(doi: str) -> Path:
     )
 
 
-def _url(url: str) -> Path:
+def _url(url: str, progress: Progress) -> Path:
     name = "url-" + re.sub(r"[^\w.-]", "_", url.split("://", 1)[1])[:120]
-    return _download(url, name)
+    return _download(url, name, progress)
 
 
-def _download(url: str, name: str) -> Path:
-    print(f"Downloading {url}...", file=sys.stderr)
+def _download(url: str, name: str, progress: Progress) -> Path:
+    progress(f"Downloading {url}...", None)
     body, content_type, _ = _get(url)
     return _save(body, name, _suffix(body, content_type))
 

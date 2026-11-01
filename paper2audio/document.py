@@ -9,13 +9,13 @@ after reading: CITE_START [12] CITE_END, NOTE_MARK.
 """
 
 import re
-import sys
 from collections.abc import Collection
 from dataclasses import dataclass
 
 from pylatexenc.latex2text import LatexNodes2Text
 
 from . import clean, llm
+from .progress import Progress, print_progress
 
 KINDS = ("title", "authors", "keywords", "metadata", "abstract", "heading", "body", "caption", "table",
          "equation", "footnote", "references", "acknowledgements", "declarations")
@@ -62,7 +62,8 @@ class Block:
     appendix: bool = False  # after the references: appendices, supplementary material
 
 
-def to_speech(blocks: list[Block], sections: Collection[str], model: str | None) -> str:
+def to_speech(blocks: list[Block], sections: Collection[str], model: str | None,
+              progress: Progress = print_progress) -> str:
     """The text to be read aloud, one paragraph per line."""
     blocks = [b for b in blocks if _wanted(b, sections)]
     paragraphs = []
@@ -85,7 +86,7 @@ def to_speech(blocks: list[Block], sections: Collection[str], model: str | None)
             text = f"Footnote: {text}"
         paragraphs.append(text)
 
-    spoken = speak_math([(m.group(1), _context(p, m)) for p in paragraphs for m in MATH.finditer(p)], model)
+    spoken = speak_math([(m.group(1), _context(p, m)) for p in paragraphs for m in MATH.finditer(p)], model, progress)
     paragraphs = [MATH.sub(lambda m: spoken[m.group(1)], p) for p in paragraphs]
     # Blocks are already selected; only tidy up: spaces, URLs, and no letterless lines (phonon fails on those).
     lines = [clean.normalize(SPACE_BEFORE_PUNCTUATION.sub(r"\1", " ".join(p.split()))) for p in paragraphs]
@@ -106,7 +107,8 @@ def _wanted(block: Block, sections: Collection[str]) -> bool:
     return block.kind in sections  # title, authors, keywords, metadata, abstract, references, ...
 
 
-def speak_math(snippets: list[tuple[str, str]], model: str | None) -> dict[str, str]:
+def speak_math(snippets: list[tuple[str, str]], model: str | None,
+               progress: Progress = print_progress) -> dict[str, str]:
     """Spoken form of each LaTeX snippet, given as (snippet, the sentence around it).
 
     A snippet that occurs several times is converted once, in its first context.
@@ -125,7 +127,7 @@ def speak_math(snippets: list[tuple[str, str]], model: str | None) -> dict[str, 
             spoken[snippet] = _latex_to_text(snippet)
     for start in range(0, len(hard), MATH_BATCH):
         batch = hard[start:start + MATH_BATCH]
-        print(f"Converting formulas {start + 1}-{start + len(batch)} of {len(hard)}...", file=sys.stderr)
+        progress(f"Converting formulas {start + 1}-{start + len(batch)} of {len(hard)}...", start / len(hard))
         answers = llm.generate_keyed(model, MATH_PROMPT, [contexts[s] for s in batch], field="spoken")
         for snippet, answer in zip(batch, answers):
             spoken[snippet] = answer.strip() if answer else _latex_to_text(snippet)

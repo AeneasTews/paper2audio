@@ -65,6 +65,16 @@ def capabilities(model: str) -> frozenset[str]:
     return frozenset(_post("/api/show", {"model": model}).get("capabilities") or ())
 
 
+def show(model: str) -> dict:
+    """Ollama's details about a model, e.g. its capabilities, or a speech model's voices."""
+    return _post("/api/show", {"model": model})
+
+
+def model_names() -> list[str]:
+    """Installed models as ollama lists them, e.g. "gemma4:12b", "phonon:latest"."""
+    return sorted(m["name"] for m in _get("/api/tags").get("models", []))
+
+
 def installed_models() -> set[str]:
     """Names of installed models, with and without the ":latest" tag."""
     names = {m["name"] for m in _get("/api/tags").get("models", [])}

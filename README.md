@@ -8,6 +8,12 @@ paper2audio reads a paper (a PDF, an arXiv ID, a DOI, HTML, JATS XML, EPUB, LaTe
 paper2audio convert --input=arxiv:1706.03762 --output=attention.mp3 --speed=1.5
 ```
 
+Or use the desktop app, which shows the paper next to the settings:
+
+```sh
+paper2audio-gui
+```
+
 ## Requirements
 
 - macOS or Linux
@@ -21,15 +27,18 @@ From the project folder:
 ```sh
 ./setup.sh            # asks which language model to download
 ./setup.sh gemma4:12b # or name one directly ("none" for no language model)
+./setup.sh --no-gui   # only the command-line tool, without the desktop app
 ```
 
 The script is safe to re-run; anything already set up is skipped. It:
 
 1. installs ollama with the [official installer](https://ollama.com/download) if the `ollama` command isn't found
-2. starts the ollama server if it isn't running
+2. if no ollama server is running, starts a temporary one for the downloads and stops it again at the end (a server that's already running, like the Ollama app, is left alone)
 3. installs uv with its official installer if it's missing
-4. installs the `paper2audio` command (`uv tool install --editable .`), so changes to the code take effect immediately
+4. installs the `paper2audio` and `paper2audio-gui` commands (`uv tool install --editable '.[gui]'`), so changes to the code take effect immediately
 5. downloads the `phonon` speech model and the language model
+
+If you already have everything, `uv tool install -e '.[gui]'` on its own is enough. Leave out `[gui]` if you only want the command line tool; the desktop app's extra packages ([NiceGUI](https://nicegui.io) and [pywebview](https://pywebview.flowrl.com)) are then not installed.
 
 ### Choosing a language model
 
@@ -147,6 +156,28 @@ citations = false
 
 With `gemma4:26b` or `gemma4:12b` on an M-series Mac, each page takes roughly 10 to 30 seconds, so a 10-page paper takes a few minutes before speaking starts. Speaking is fast: about 30 minutes of audio takes around a minute. Without a language model, the whole conversion takes about a minute.
 
+## Desktop app
+
+```sh
+paper2audio-gui              # or: paper2audio-gui paper.pdf
+```
+
+A PDF reader with the conversion settings next to it, laid out like a reference manager's reader: a toolbar on top, a sidebar on the left, the paper in the middle and an item pane on the right.
+
+- **Opening papers:** open a file (**⌘O**: PDF, HTML, JATS XML, EPUB, LaTeX, text or Markdown), or open a paper by arXiv ID, DOI or URL with the link button (**⇧⌘O**); it's downloaded as described under [Inputs](#inputs). Audio for a downloaded paper is saved to your Downloads folder by default, named after the paper.
+- **Reading:** PDF pages are rendered at exactly the size they're shown on screen, including on high-DPI (Retina) displays, so text stays sharp at any zoom. Zoom with the toolbar, **⌘ +** / **⌘ −** / **⌘ 0** (Ctrl on Windows and Linux), Ctrl/⌘ + scroll wheel, or by pinching on the trackpad. HTML, JATS XML, EPUB and LaTeX papers are shown as a formatted document (title, abstract, headings, captions, formulas, footnotes) built from the same blocks that are read aloud; downloaded pages are never run as web pages. Text and Markdown files are shown as text.
+- **Selecting text:** text in PDFs can be selected and copied like in any PDF reader.
+- **Annotations:** select text and pick a color in the popup to highlight it, or use the toolbar's highlight, underline and note tools (with eight colors). Every annotation gets a card in the sidebar, where you can add a comment, change its color or delete it (or select it and press Delete). Annotations are saved automatically in your user data folder (`~/Library/Application Support/paper2audio/annotations` on macOS), keyed by the PDF's contents. The PDF itself is never changed.
+- **Sidebar:** annotations (searchable), page thumbnails, and the PDF's outline. Sections with subsections can be folded with their arrow (Alt-click folds everything under them), or all at once with the expand/collapse buttons.
+- **Right pane:** the same settings as the command line: voice, speed, language model (*Automatic* picks one for your machine as described above, or choose an installed model, or *None* for the rule-based cleanup) and which [sections](#sections) to read. Defaults come from the [config file](#config-file). **Convert to audio** becomes **Stop** while it runs; it stops after the current page. When it's done, a player for the audio appears, with **Show in folder** to find the file. The output defaults to the paper's name with `.mp3` next to the paper; any of the supported formats works.
+- **Keyboard shortcuts:** ⌘O open, ⇧⌘O open from arXiv, DOI or URL, ⌘W close, ⌘↩ convert or stop, ⌘+ / ⌘− / ⌘0 zoom, ⌥⌘G go to page, ⌥⌘1 / 2 / 3 highlight, underline and note tools, arrow keys, Space, Page Up/Down and Home/End to move through the paper, Esc and Delete for annotations (Ctrl instead of ⌘ on Windows and Linux). ⌘/ or the keyboard button in the toolbar shows the full list.
+- **Report an issue:** the bug button in the toolbar opens a form; **Open on GitHub** then opens a new issue on this repository in your browser, filled in with your description and (optionally) system info and the conversion log, with your home folder shown as `~`. You review and submit it on GitHub.
+- **Setup:** when the window opens, it checks in the background for what `setup.sh` would install: ollama, the phonon model and the language model recommended for this machine (or the one set in the config file). If something is missing, a dialog lists it and **Install** runs `setup.sh --no-command` in the background, showing the download progress. The language model is optional and can be unticked. The wrench button in the toolbar opens this dialog at any time and reloads the voices and models. If the ollama installer needs a password it can't ask for here, run `./setup.sh` in a terminal instead.
+
+It opens as a native window (no browser needed) and follows the system's light or dark mode. Under the hood it's a [NiceGUI](https://nicegui.io) app served only on `127.0.0.1` and shown with the system's web view. Closing the window during a conversion stops it after the current step, so a temporary ollama server is still shut down.
+
+Icons are from [Lucide](https://lucide.dev) (ISC license, see `paper2audio/reader/icons/`).
+
 ## How it works
 
 1. **Server** (`server.py`): if no ollama server is running, starts `ollama serve` for the duration of the run and shuts it down afterwards, also on Ctrl+C. An already-running server (e.g. the Ollama desktop app) is used and left alone.
@@ -161,6 +192,8 @@ With `gemma4:26b` or `gemma4:12b` on an M-series Mac, each page takes roughly 10
    - strips Markdown syntax and skips code blocks; list items and table rows are read one at a time
 6. **Speak** (`tts.py`): sends the text to `ollama run phonon` in chunks of about 4,000 characters and stitches the audio together. If phonon rejects a chunk, that chunk is skipped instead of failing the whole run.
 7. **Save** (`audio.py`): applies the speed with ffmpeg's `atempo` filter, which keeps the pitch of the voice, and encodes the chosen format (64 kbps for MP3/AAC, 32 kbps Opus, lossless FLAC/WAV/AIFF). This uses [PyAV](https://pyav.basswood-io.com), which bundles ffmpeg's libraries, so ffmpeg doesn't need to be installed. phonon has no speed setting of its own (ollama only accepts speed 1).
+
+`paper2audio/pipeline.py` runs these steps; both `cli.py` and the desktop app (`gui.py`) call it.
 
 ## Known limitations
 
