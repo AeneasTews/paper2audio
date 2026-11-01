@@ -2,10 +2,10 @@
 
 Turn scientific papers into audio files, so you can listen to them while cycling, walking or commuting instead of reading them on a screen.
 
-paper2audio reads a PDF, plain text or Markdown file and turns it into speech with [ollama](https://ollama.com)'s **phonon** model. For PDFs, a local language model (Gemma 4 by default) looks at each page and writes out what should be spoken: formulas in words, figures and tables described, headers, page numbers and citations left out. You choose which parts of the paper you want to hear. Everything runs locally.
+paper2audio reads a paper (a PDF, an arXiv ID, a DOI, HTML, JATS XML, EPUB, LaTeX, text or Markdown) and turns it into speech with [ollama](https://ollama.com)'s **phonon** model. For PDFs, a local language model (Gemma 4 by default) looks at each page and writes out what should be spoken: formulas in words, figures and tables described, headers, page numbers and citations left out. You choose which parts of the paper you want to hear. Everything runs locally.
 
 ```sh
-paper2audio convert --input=paper.pdf --output=paper.mp3 --speed=1.5
+paper2audio convert --input=arxiv:1706.03762 --output=attention.mp3 --speed=1.5
 ```
 
 Or use the desktop app, which shows the paper next to the settings:
@@ -56,6 +56,11 @@ Any other ollama model works too, with `--llm-model` or in the config file. Mode
 ## Usage
 
 ```sh
+# Papers by arXiv ID, DOI or URL: downloaded automatically
+paper2audio convert --input=arxiv:1706.03762 --output=paper.mp3
+paper2audio convert --input=10.1371/journal.pbio.1002533 --output=paper.mp3
+paper2audio convert --input=https://example.org/paper.pdf --output=paper.mp3
+
 # Any common audio format: .mp3, .m4a, .opus, .ogg, .flac, .wav, .aiff
 paper2audio convert --input=paper.pdf --output=paper.mp3
 paper2audio convert --input=paper.pdf --output=paper.opus
@@ -63,9 +68,9 @@ paper2audio convert --input=paper.pdf --output=paper.opus
 # Faster (or slower) playback, without the voice getting higher
 paper2audio convert --input=paper.pdf --output=paper.mp3 --speed=1.5
 
-# Plain text and Markdown work too
+# Local files: .pdf, .html, .xml (JATS), .epub, .tex, .txt, .md
 paper2audio convert --input=notes.txt --output=notes.mp3
-paper2audio convert --input=article.md --output=article.mp3
+paper2audio convert --input=paper/main.tex --output=paper.mp3
 
 # Choose what to hear
 paper2audio convert --input=paper.pdf --output=paper.mp3 --include=summary,authors --exclude=figures
@@ -77,7 +82,7 @@ paper2audio convert --input=paper.pdf --output=paper.mp3 --no-llm
 
 | Option | Description |
 | --- | --- |
-| `--input` | File to read: `.pdf`, `.txt` or `.md` (required) |
+| `--input` | The paper: a file, a URL, a DOI or an arXiv ID (required); see [Inputs](#inputs) |
 | `--output` | Audio file to write: `.mp3`, `.m4a`, `.opus`, `.ogg`, `.flac`, `.wav` or `.aiff` (required) |
 | `--speed` | Playback speed from 0.5 to 4, e.g. `1.5` (default: 1) |
 | `--voice` | phonon voice (default: `Zoey`) |
@@ -85,6 +90,21 @@ paper2audio convert --input=paper.pdf --output=paper.mp3 --no-llm
 | `--no-llm` | Don't use a language model, only the rule-based cleanup |
 | `--include` | Comma-separated sections to read in addition to the defaults |
 | `--exclude` | Comma-separated sections to leave out |
+
+### Inputs
+
+| Input | How it's read |
+| --- | --- |
+| arXiv ID (`arxiv:1706.03762`, `1706.03762`, `hep-th/9711200`, an arxiv.org link, or an arXiv DOI) | The paper's HTML version from arxiv.org, or from [ar5iv](https://ar5iv.labs.arxiv.org) for older papers. It keeps the LaTeX of every formula and marks sections, captions, footnotes and references, so it's read more accurately than the PDF. Falls back to the PDF if there's no HTML version. |
+| DOI (`10.1371/...`, `doi:10.1371/...` or a doi.org link) | Open-access papers in PubMed Central (most open-access biology, medicine and many chemistry journals) as JATS XML from [Europe PMC](https://europepmc.org). Otherwise the PDF linked from the publisher's page, if it's freely available; closed papers fail with a message. |
+| URL | Downloaded and read according to what it is (PDF, HTML, JATS XML or EPUB). |
+| `.pdf` | Read page by page by the language model, or with the rule-based cleanup without one. |
+| `.html`, `.xml` (JATS), `.epub`, `.tex` | Structured: sections, captions, footnotes, references and formulas are taken from the markup, so section selection is exact. LaTeX files are followed through `\input`/`\include`, and simple macros are expanded. |
+| `.txt`, `.md` | Read as text; Markdown syntax is stripped. |
+
+Downloads are cached in `~/.cache/paper2audio`.
+
+In structured formats, formulas are spoken in words by the language model, or shown as Unicode text without one (e.g. `√(d_k)`). Tables are described by the language model and skipped without one; captions are always read when `figures` is on.
 
 ### Changing the speed of an existing file
 
@@ -140,12 +160,13 @@ paper2audio-gui              # or: paper2audio-gui paper.pdf
 
 A PDF reader with the conversion settings next to it, laid out like a reference manager's reader: a toolbar on top, a sidebar on the left, the paper in the middle and an item pane on the right.
 
-- **Reading:** pages are rendered at exactly the size they're shown on screen, including on high-DPI (Retina) displays, so text stays sharp at any zoom. Zoom with the toolbar, **⌘ +** / **⌘ −** / **⌘ 0** (Ctrl on Windows and Linux), Ctrl/⌘ + scroll wheel, or by pinching on the trackpad. Text and Markdown files are shown as text.
+- **Opening papers:** open a file (**⌘O**: PDF, HTML, JATS XML, EPUB, LaTeX, text or Markdown), or open a paper by arXiv ID, DOI or URL with the link button (**⇧⌘O**); it's downloaded as described under [Inputs](#inputs). Audio for a downloaded paper is saved to your Downloads folder by default, named after the paper.
+- **Reading:** PDF pages are rendered at exactly the size they're shown on screen, including on high-DPI (Retina) displays, so text stays sharp at any zoom. Zoom with the toolbar, **⌘ +** / **⌘ −** / **⌘ 0** (Ctrl on Windows and Linux), Ctrl/⌘ + scroll wheel, or by pinching on the trackpad. HTML, JATS XML, EPUB and LaTeX papers are shown as a formatted document (title, abstract, headings, captions, formulas, footnotes) built from the same blocks that are read aloud; downloaded pages are never run as web pages. Text and Markdown files are shown as text.
 - **Selecting text:** text in PDFs can be selected and copied like in any PDF reader.
 - **Annotations:** select text and pick a color in the popup to highlight it, or use the toolbar's highlight, underline and note tools (with eight colors). Every annotation gets a card in the sidebar, where you can add a comment, change its color or delete it (or select it and press Delete). Annotations are saved automatically in your user data folder (`~/Library/Application Support/paper2audio/annotations` on macOS), keyed by the PDF's contents. The PDF itself is never changed.
 - **Sidebar:** annotations (searchable), page thumbnails, and the PDF's outline. Sections with subsections can be folded with their arrow (Alt-click folds everything under them), or all at once with the expand/collapse buttons.
 - **Right pane:** the same settings as the command line: voice, speed, language model (*Automatic* picks one for your machine as described above, or choose an installed model, or *None* for the rule-based cleanup) and which [sections](#sections) to read. Defaults come from the [config file](#config-file). **Convert to audio** becomes **Stop** while it runs; it stops after the current page. When it's done, a player for the audio appears, with **Show in folder** to find the file. The output defaults to the paper's name with `.mp3` next to the paper; any of the supported formats works.
-- **Keyboard shortcuts:** ⌘O open, ⌘W close, ⌘↩ convert or stop, ⌘+ / ⌘− / ⌘0 zoom, ⌥⌘G go to page, ⌥⌘1 / 2 / 3 highlight, underline and note tools, arrow keys, Space, Page Up/Down and Home/End to move through the paper, Esc and Delete for annotations (Ctrl instead of ⌘ on Windows and Linux). ⌘/ or the keyboard button in the toolbar shows the full list.
+- **Keyboard shortcuts:** ⌘O open, ⇧⌘O open from arXiv, DOI or URL, ⌘W close, ⌘↩ convert or stop, ⌘+ / ⌘− / ⌘0 zoom, ⌥⌘G go to page, ⌥⌘1 / 2 / 3 highlight, underline and note tools, arrow keys, Space, Page Up/Down and Home/End to move through the paper, Esc and Delete for annotations (Ctrl instead of ⌘ on Windows and Linux). ⌘/ or the keyboard button in the toolbar shows the full list.
 - **Report an issue:** the bug button in the toolbar opens a form; **Open on GitHub** then opens a new issue on this repository in your browser, filled in with your description and (optionally) system info and the conversion log, with your home folder shown as `~`. You review and submit it on GitHub.
 - **Setup:** when the window opens, it checks in the background for what `setup.sh` would install: ollama, the phonon model and the language model recommended for this machine (or the one set in the config file). If something is missing, a dialog lists it and **Install** runs `setup.sh --no-command` in the background, showing the download progress. The language model is optional and can be unticked. The wrench button in the toolbar opens this dialog at any time and reloads the voices and models. If the ollama installer needs a password it can't ask for here, run `./setup.sh` in a terminal instead.
 
@@ -157,15 +178,16 @@ Icons are from [Lucide](https://lucide.dev) (ISC license, see `paper2audio/reade
 
 1. **Server** (`server.py`): if no ollama server is running, starts `ollama serve` for the duration of the run and shuts it down afterwards, also on Ctrl+C. An already-running server (e.g. the Ollama desktop app) is used and left alone.
 2. **Model** (`hardware.py`, `llm.py`): picks the language model, from the command line, the config file, or memory size. If none is installed, the rule-based cleanup is used.
-3. **Transcribe** (`transcribe.py`, PDFs with a language model): renders each page as an image (`extract.py`, with [pypdfium2](https://github.com/pypdfium2-team/pypdfium2)) and sends it to the model with the page's text extracted by [pypdf](https://pypdf.readthedocs.io). The prompt is built from the chosen sections. The end of the previous page is passed along, so sentences across page breaks stay whole. If a page's output looks incomplete, it's retried once. Pages after the references are skipped unless the references or appendix are wanted. The optional summary is written from the full transcript.
-4. **Clean** (`clean.py`): the rule-based cleanup for text, Markdown and PDFs without a language model:
+3. **Fetch and read** (`fetch.py`, `readers.py`, `document.py`): arXiv IDs, DOIs and URLs are downloaded. Structured formats are read into labeled blocks (title, authors, abstract, heading, body, equation, caption, table, footnote, references, acknowledgements, appendix); the chosen sections are kept, text is copied as it is, and only formulas are rewritten, into words.
+4. **Transcribe** (`transcribe.py`, PDFs with a language model): renders each page as an image (`extract.py`, with [pypdfium2](https://github.com/pypdfium2-team/pypdfium2)) and sends it to the model with the page's text extracted by [pypdf](https://pypdf.readthedocs.io). The prompt is built from the chosen sections. The end of the previous page is passed along, so sentences across page breaks stay whole. If a page's output looks incomplete, it's retried once. Pages after the references are skipped unless the references or appendix are wanted. The optional summary is written from the full transcript.
+5. **Clean** (`clean.py`): the rule-based cleanup for text, Markdown and PDFs without a language model:
    - removes repeated headers and footers, citation markers, URLs, emails and footnote symbols
    - drops the references, acknowledgements and front matter as configured
    - removes lines without any letters (page numbers, `_____` separators)
    - rejoins hyphenated words and glues lines back into paragraphs
    - strips Markdown syntax and skips code blocks; list items and table rows are read one at a time
-5. **Speak** (`tts.py`): sends the text to `ollama run phonon` in chunks of about 4,000 characters and stitches the audio together. If phonon rejects a chunk, that chunk is skipped instead of failing the whole run.
-6. **Save** (`audio.py`): applies the speed with ffmpeg's `atempo` filter, which keeps the pitch of the voice, and encodes the chosen format (64 kbps for MP3/AAC, 32 kbps Opus, lossless FLAC/WAV/AIFF). This uses [PyAV](https://pyav.basswood-io.com), which bundles ffmpeg's libraries, so ffmpeg doesn't need to be installed. phonon has no speed setting of its own (ollama only accepts speed 1).
+6. **Speak** (`tts.py`): sends the text to `ollama run phonon` in chunks of about 4,000 characters and stitches the audio together. If phonon rejects a chunk, that chunk is skipped instead of failing the whole run.
+7. **Save** (`audio.py`): applies the speed with ffmpeg's `atempo` filter, which keeps the pitch of the voice, and encodes the chosen format (64 kbps for MP3/AAC, 32 kbps Opus, lossless FLAC/WAV/AIFF). This uses [PyAV](https://pyav.basswood-io.com), which bundles ffmpeg's libraries, so ffmpeg doesn't need to be installed. phonon has no speed setting of its own (ollama only accepts speed 1).
 
 `paper2audio/pipeline.py` runs these steps; both `cli.py` and the desktop app (`gui.py`) call it.
 

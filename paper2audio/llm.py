@@ -25,6 +25,40 @@ def generate(model: str, prompt: str, images: list[bytes] = (), num_ctx: int = 1
     return _post("/api/generate", payload).get("response", "").strip()
 
 
+def generate_keyed(model: str, prompt: str, items: list[str], field: str) -> list[str | None]:
+    """Ask for one string per item, answered as JSON keyed by item number.
+
+    Keys (rather than a plain list) mean a skipped item can't shift the answers for the
+    others. Items the model doesn't answer come back as None.
+    """
+    schema = {
+        "type": "object",
+        "properties": {"answers": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"item": {"type": "integer"}, field: {"type": "string"}},
+            "required": ["item", field],
+        }}},
+        "required": ["answers"],
+    }
+    numbered = "\n".join(f"[{i}] {item}" for i, item in enumerate(items))
+    payload = {
+        "model": model,
+        "prompt": f'{prompt}\n\nAnswer with JSON: {{"answers": [{{"item": <number>, "{field}": ...}}, ...]}}, '
+                  f"one entry for each of the {len(items)} items.\n\n{numbered}",
+        "stream": False,
+        "format": schema,
+        "options": {"temperature": 0, "num_ctx": 16384},
+    }
+    if "thinking" in capabilities(model):
+        payload["think"] = False
+    try:
+        answers = json.loads(_post("/api/generate", payload).get("response", "")).get("answers", [])
+    except ValueError:
+        return [None] * len(items)
+    by_item = {a["item"]: a[field] for a in answers if isinstance(a, dict) and isinstance(a.get("item"), int)}
+    return [by_item.get(i) for i in range(len(items))]
+
+
 @functools.cache
 def capabilities(model: str) -> frozenset[str]:
     """What the model can do according to ollama, e.g. "completion", "vision", "thinking"."""

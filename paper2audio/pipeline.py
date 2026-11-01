@@ -2,10 +2,31 @@
 
 from pathlib import Path
 
-from . import audio, clean, config, extract, hardware, llm, server, transcribe, tts
+from . import audio, clean, config, document, extract, fetch, hardware, llm, readers, server, transcribe, tts
 from .progress import Progress, print_progress
 
-SUPPORTED_INPUTS = (".pdf", ".txt", ".md")
+# Structured formats, read into labeled blocks (see readers.py)
+STRUCTURED_READERS = {
+    ".html": lambda path: readers.read_html(path.read_text(errors="replace")),
+    ".htm": lambda path: readers.read_html(path.read_text(errors="replace")),
+    ".xhtml": lambda path: readers.read_html(path.read_text(errors="replace")),
+    ".xml": lambda path: readers.read_jats(path.read_text(errors="replace")),
+    ".epub": readers.read_epub,
+    ".tex": readers.read_tex,
+}
+SUPPORTED_INPUTS = (".pdf", ".txt", ".md", *STRUCTURED_READERS)
+
+
+def resolve(source: str, progress: Progress = print_progress) -> Path:
+    """A local file for the input: the file itself, or a download of the paper for an
+    arXiv ID, DOI or URL. Raises RuntimeError if it can't be found or read."""
+    try:
+        path = fetch.resolve(source, progress)
+    except fetch.FetchError as e:
+        raise RuntimeError(str(e)) from None
+    if path.suffix.lower() not in SUPPORTED_INPUTS:
+        raise RuntimeError(f"the paper must be one of {', '.join(SUPPORTED_INPUTS)}, a URL, a DOI or an arXiv ID")
+    return path
 
 
 def convert(input_path: Path, output_path: Path, settings: config.Settings,
@@ -33,14 +54,20 @@ def prepare_text(path: Path, settings: config.Settings, progress: Progress = pri
     """Read the input file and return cleaned, speakable text, one paragraph per line."""
     model = choose_model(settings.llm_model, progress)
     sections = settings.sections
+    suffix = path.suffix.lower()
     if model is None:
-        wanted = sorted(sections & config.LLM_ONLY_SECTIONS - ({"figures", "formulas"} if path.suffix != ".pdf" else set()))
+        # Structured formats mark figures, formulas, footnotes and appendices themselves.
+        needs_model = config.LLM_ONLY_SECTIONS if suffix == ".pdf" else {"summary"}
+        wanted = sorted(sections & needs_model)
         if wanted:
             progress(f"Note: without a language model these sections can't be handled: {', '.join(wanted)}", None)
     else:
         progress(f"Using language model {model}", None)
     try:
-        if path.suffix.lower() == ".pdf":
+        if suffix in STRUCTURED_READERS:
+            progress(f"Reading {path}...", None)
+            text = document.to_speech(STRUCTURED_READERS[suffix](path), sections, model, progress)
+        elif suffix == ".pdf":
             if model:
                 text = transcribe.transcribe_pdf(path, model, sections, progress)
             else:
@@ -49,7 +76,7 @@ def prepare_text(path: Path, settings: config.Settings, progress: Progress = pri
         else:
             progress(f"Reading {path}...", None)
             raw = path.read_text(encoding="utf-8", errors="replace")
-            text = clean.clean_markdown(raw, sections) if path.suffix.lower() == ".md" else clean.clean_text(raw, sections)
+            text = clean.clean_markdown(raw, sections) if suffix == ".md" else clean.clean_text(raw, sections)
         if model and text and "summary" in sections:
             text = f"Summary: {transcribe.summarize(text, model, progress)}\nNow the paper itself.\n{text}"
     finally:

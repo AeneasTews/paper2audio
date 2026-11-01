@@ -106,6 +106,54 @@
     });
   }
 
+  // Structured papers (HTML, JATS XML, EPUB, LaTeX): the labeled blocks they're read from,
+  // shown as a formatted document. Text only: downloaded pages never run as web pages here.
+  function showBlocks(title, url) {
+    showMessage("file-text", "Loading…");
+    $("p2a-tab-title").textContent = title;
+    fetch(url).then((r) => {
+      if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || r.statusText); });
+      return r.json();
+    }).then((blocks) => {
+      const container = $("p2a-pages");
+      container.innerHTML = "";
+      const doc = el("article", "p2a-textdoc p2a-blocks");
+      let inAppendix = false;
+      for (const [kind, text, appendix] of blocks) {
+        if (appendix && !inAppendix) {
+          inAppendix = true;
+          doc.append(el("div", "p2a-block-divider", "Appendix"));
+        }
+        const tag = { title: "h1", heading: "h2", equation: "div", table: "pre" }[kind] || "p";
+        const block = el(tag, `p2a-block p2a-block-${kind}`);
+        // Math is wrapped in U+2063 ... U+2064 by the server: set it in italics.
+        text.split(/(\u2063[^\u2064]*\u2064)/).forEach((part) => {
+          if (part.startsWith("\u2063")) {
+            const math = el("span", "p2a-math");
+            // "x_1", "d_model", "K^T" -> sub- and superscripts
+            part.slice(1, -1).split(/([_^](?:\w+|\([^)]*\)))/).forEach((piece) => {
+              if (/^[_^]./.test(piece)) {
+                const script = el(piece[0] === "_" ? "sub" : "sup");
+                script.textContent = piece.slice(1).replace(/^\((.*)\)$/, "$1");
+                math.append(script);
+              } else if (piece) {
+                math.append(document.createTextNode(piece));
+              }
+            });
+            block.append(math);
+          } else if (part) {
+            block.append(document.createTextNode(part));
+          }
+        });
+        if (kind === "abstract") block.prepend(el("strong", "", "Abstract. "));
+        if (kind === "footnote") block.prepend(el("span", "p2a-block-label", "Footnote: "));
+        doc.append(block);
+      }
+      if (!blocks.length) doc.append(el("p", "p2a-empty", "No readable text found in this file."));
+      container.append(doc);
+    }).catch((e) => showMessage("file-text", `Can’t show this file: ${e.message}`));
+  }
+
   function setControlsEnabled(enabled) {
     document.querySelectorAll("[data-needs-pdf]").forEach((b) => { b.disabled = !enabled; });
     $("p2a-page-input").disabled = !enabled;
@@ -770,6 +818,7 @@
         return;
       }
     }
+    if (mod && e.shiftKey && !e.altKey && e.code === "KeyO") { e.preventDefault(); emit("p2a_open_remote"); return; }
     if (mod && !e.shiftKey) {
       const key = e.key.toLowerCase();
       if (!e.altKey && key === "o") { e.preventDefault(); emit("p2a_open"); return; }
@@ -852,7 +901,7 @@
   window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(sharpen, 150); });
 
   window.P2A = {
-    open, showMessage, showText, setZoom, zoomStep, goToPage, setTool, setColor,
+    open, showMessage, showText, showBlocks, setZoom, zoomStep, goToPage, setTool, setColor,
     get state() { return state; },
   };
 })();

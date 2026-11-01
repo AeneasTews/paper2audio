@@ -14,6 +14,7 @@ import io
 import json
 import platform
 import queue
+import re
 import secrets
 import shutil
 import subprocess
@@ -35,7 +36,7 @@ try:
 except ImportError as e:  # GUI extras are optional; the CLI works without them
     sys.exit(f"The GUI needs extra packages ({e.name}). Install them with: uv tool install -e '.[gui]'")
 
-from . import annotations, audio, config, hardware, models, pipeline, requirements, server, tts
+from . import annotations, audio, config, document, hardware, models, pipeline, requirements, server, tts
 from .setup_dialog import SetupDialog
 
 READER_DIR = Path(__file__).parent / "reader"
@@ -177,6 +178,40 @@ def _put_annotations(token: str, body: list = Body(...)) -> dict:
     return {"ok": True}
 
 
+# Math in preview text is wrapped in these, so the reader can set it in italics.
+MATH_START, MATH_END = "\u2063", "\u2064"  # invisible separator / invisible plus
+# What the structured formats are called in the pane
+FORMAT_NAMES = {".html": "HTML", ".htm": "HTML", ".xhtml": "HTML", ".xml": "JATS XML", ".epub": "EPUB", ".tex": "LaTeX"}
+
+
+@lru_cache(maxsize=8)
+def _read_blocks(path: Path, mtime: float) -> list:
+    """A structured paper's blocks for the preview: [kind, text, in the appendix]."""
+    blocks = pipeline.STRUCTURED_READERS[path.suffix.lower()](path)
+    result = []
+    for block in blocks:
+        text = block.text.replace(document.NOTE_MARK, "")
+        text = document.CITATION.sub(r"\1", text)  # keep citations, drop the markers around them
+        # Math as readable Unicode (e.g. "√(d_k)") instead of LaTeX, marked for italics.
+        if block.kind == "equation":
+            text = document._latex_to_text(text)
+        else:
+            text = document.MATH.sub(lambda m: f"{MATH_START}{document._latex_to_text(m.group(1))}{MATH_END}", text)
+        text = text.strip() if block.kind in ("table", "equation") else " ".join(text.split())
+        if text:
+            result.append([block.kind, text, block.appendix])
+    return result
+
+
+@app.get("/blocks/{token}")
+def _blocks(token: str) -> list:
+    path = _document(token).path
+    try:
+        return _read_blocks(path, path.stat().st_mtime)
+    except Exception as e:  # malformed files: show the reason in the preview
+        raise HTTPException(422, f"{type(e).__name__}: {e}") from None
+
+
 @app.get("/textfile/{token}")
 def _text_file(token: str) -> PlainTextResponse:
     path = _document(token).path
@@ -194,6 +229,7 @@ def _audio_file(token: str) -> FileResponse:
 # --- static parts of the window -------------------------------------------------------------
 
 _MOD = "⌘" if sys.platform == "darwin" else "Ctrl+"
+_SHIFT_MOD = "⇧⌘" if sys.platform == "darwin" else "Ctrl+Shift+"
 
 
 def _button(action: str, icon_name: str, title: str, needs_pdf: bool = True, extra: str = "", cls: str = "") -> str:
@@ -204,7 +240,8 @@ def _button(action: str, icon_name: str, title: str, needs_pdf: bool = True, ext
 
 TOP_HTML = f"""
 <div id="p2a-tabs">
-  {_button("emit-open", "folder-open", "Open a paper…", needs_pdf=False)}
+  {_button("emit-open", "folder-open", f"Open a paper… ({_MOD}O)", needs_pdf=False)}
+  {_button("emit-open_remote", "link", f"Open from arXiv, DOI or URL… ({_SHIFT_MOD}O)", needs_pdf=False)}
   <div class="p2a-tab">{icon("file-text")}<span id="p2a-tab-title">No paper open</span></div>
 </div>
 <div id="p2a-toolbar">
@@ -342,6 +379,9 @@ class PaperApp:
         self.worker: threading.Thread | None = None
         self.options_loader: threading.Thread | None = None
         self.input_path: Path | None = initial_file
+        self.input_source: str | None = None  # arXiv ID, DOI or URL the input was downloaded from
+        self.fetcher: threading.Thread | None = None
+        self.fetch_status = None  # the open-remote dialog's status label, while it's open
         self.output_path: Path | None = None
         self.language_models: list[str] = []
         self.recommended_model: str | None = None
@@ -370,6 +410,7 @@ class PaperApp:
                 self._build_pane()
         self.setup = SetupDialog(on_installed=self._refresh_options)
         ui.on("p2a_open", self._choose_input)
+        ui.on("p2a_open_remote", self._show_open_remote)
         ui.on("p2a_setup", self._open_setup)
         ui.on("p2a_convert", self._on_convert)
         ui.on("p2a_close", self._close_window)
@@ -420,7 +461,8 @@ class PaperApp:
 
                 sections_section = Section("p2a-sec-sections", "Sections", "list-tree")
                 with sections_section.body:
-                    ui.label("What to read aloud. Some need a language model.").classes("p2a-hint")
+                    ui.label("What to read aloud. For PDFs, some need a language model; HTML, XML, "
+                             "EPUB and LaTeX mark them in the file itself.").classes("p2a-hint")
                     self.section_boxes = {}
                     for name, (_, description) in config.SECTIONS.items():
                         with ui.element("label").classes("p2a-check p2a-section-option"):
@@ -431,13 +473,15 @@ class PaperApp:
                             self.section_boxes[name] = box
                             with ui.element("span"):
                                 ui.label(name.capitalize()).classes("p2a-section-name")
-                                ui.label(description + (" (needs a language model)" if name in config.LLM_ONLY_SECTIONS else ""))\
+                                ui.label(description + (" (needs a language model)" if name == "summary"
+                                                        else " (PDFs: needs a language model)" if name in config.LLM_ONLY_SECTIONS
+                                                        else ""))\
                                     .classes("p2a-hint")
 
                 self.output_section = Section("p2a-sec-output", "Output", "file-text")
                 with self.output_section.body:
                     self.player = ui.element("audio").props("controls preload=metadata")
-                    ui.html(f'<span class="p2a-link">Show in folder</span>', sanitize=False).on("click", self._reveal)
+                    ui.html('<span class="p2a-link">Show in folder</span>', sanitize=False).on("click", self._reveal)
                 self.output_section.element.set_visibility(False)
 
                 log_section = Section("p2a-sec-log", "Log", "list-tree", collapsed=True)
@@ -446,6 +490,8 @@ class PaperApp:
 
                 info_section = Section("p2a-sec-info", "Info", "file-text")
                 with info_section.body:
+                    with _row("Source"):
+                        self.info_source = ui.label("—")
                     with _row("File"):
                         self.info_file = ui.label("—")
                     with _row("Pages"):
@@ -459,46 +505,104 @@ class PaperApp:
     async def _choose_input(self) -> None:
         paths = await app.native.main_window.create_file_dialog(
             allow_multiple=False,
-            file_types=("Papers (*.pdf;*.txt;*.md)", "All files (*.*)"),
+            file_types=("Papers (" + ";".join(f"*{s}" for s in pipeline.SUPPORTED_INPUTS) + ")", "All files (*.*)"),
         )
         if paths:
             self._set_input(Path(paths[0]))
 
-    def _set_input(self, path: Path) -> None:
+    def _set_input(self, path: Path, source: str | None = None) -> None:
+        """Show a paper. source: the arXiv ID, DOI or URL it was downloaded from, if any."""
         self.input_path = path
-        self._set_output(str(path.with_suffix(".mp3")))
+        self.input_source = source
         self.output_section.element.set_visibility(False)
+        self.info_source.set_text(source or "Local file")
         self.info_file.set_text(path.name)
         self.info_folder.set_text(str(path.parent))
         token = secrets.token_urlsafe(8)
         _documents.clear()  # one paper at a time
+        suffix = path.suffix.lower()
+        title = path.stem
         try:
-            if path.suffix.lower() == ".pdf":
-                document = Document(path, annotations.document_id(path))
+            if suffix == ".pdf":
+                document_ = Document(path, annotations.document_id(path))
                 with _pdfium_lock:
                     pdf = pdfium.PdfDocument(path)
                     try:
                         sizes = [list(pdf[i].get_size()) for i in range(len(pdf))]
-                        title = (pdf.get_metadata_dict().get("Title") or "").strip()
+                        meta_title = (pdf.get_metadata_dict().get("Title") or "").strip()
                     finally:
                         pdf.close()
-                _documents[token] = document
-                title = title if 3 <= len(title) <= 200 else path.stem
-                self.title_label.set_text(title)
+                _documents[token] = document_
+                title = meta_title if 3 <= len(meta_title) <= 200 else path.stem
                 self.subtitle_label.set_text(f"PDF · {len(sizes)} pages")
                 self.info_pages.set_text(str(len(sizes)))
                 ui.run_javascript(f"P2A.open({json.dumps({'token': token, 'title': title, 'pages': sizes})})")
+            elif suffix in pipeline.STRUCTURED_READERS:
+                _documents[token] = Document(path)
+                try:
+                    blocks = _read_blocks(path, path.stat().st_mtime)
+                    title = next((text for kind, text, _ in blocks if kind == "title"), path.stem)[:200]
+                except Exception:
+                    pass  # the preview shows the error
+                kind = "arXiv HTML" if path.name.startswith("arxiv-") and suffix == ".html" else FORMAT_NAMES[suffix]
+                self.subtitle_label.set_text(kind)
+                self.info_pages.set_text("—")
+                ui.run_javascript(f"P2A.showBlocks({json.dumps(title)}, {json.dumps(f'/blocks/{token}')})")
             else:
                 _documents[token] = Document(path)
-                self.title_label.set_text(path.stem)
-                self.subtitle_label.set_text("Markdown" if path.suffix.lower() == ".md" else "Text")
+                self.subtitle_label.set_text("Markdown" if suffix == ".md" else "Text")
                 self.info_pages.set_text("—")
                 ui.run_javascript(f"P2A.showText({json.dumps(path.name)}, {json.dumps(f'/textfile/{token}')})")
+            self.title_label.set_text(title)
         except (OSError, pdfium.PdfiumError) as e:
             self.title_label.set_text(path.name)
             self.subtitle_label.set_text("Can't open this file")
             ui.run_javascript(f"P2A.showMessage('file-text', {json.dumps(f'Can’t open {path.name}: {e}')})")
+        self._set_output(str(_default_output(path, title, downloaded=source is not None)))
         self._update_state()
+
+    # --- opening by arXiv ID, DOI or URL --------------------------------------------------
+
+    def _show_open_remote(self) -> None:
+        if self.fetcher and self.fetcher.is_alive():
+            return
+        with ui.dialog() as dialog, ui.card().classes("p2a-dialog p2a-report"):
+            ui.label("Open from arXiv, DOI or URL").classes("p2a-dialog-title")
+            ui.label("arXiv papers are read from their HTML version, which keeps every formula; "
+                     "open-access papers from Europe PMC. Downloads are cached in ~/.cache/paper2audio.") \
+                .classes("p2a-hint")
+            value = {"source": ""}
+            field = ui.element("input").props('type=text placeholder="arxiv:1706.03762, 10.1371/journal.pbio.1002533 or https://…"')
+            field.on("input", lambda e: value.update(source=e.args), js_handler="(e) => emit(e.target.value)")
+            field.on("keydown", lambda e: submit() if e.args == "Enter" else None, js_handler="(e) => emit(e.key)")
+            self.fetch_status = ui.label("").classes("p2a-hint")
+
+            def submit() -> None:
+                source = value["source"].strip()
+                if not source or (self.fetcher and self.fetcher.is_alive()):
+                    return
+                self.fetch_status.set_text("Looking up…")
+                _set_disabled(open_button, True)
+                self.fetcher = threading.Thread(target=self._fetch, args=(source,), daemon=True)
+                self.fetcher.start()
+
+            with ui.element("div").classes("p2a-actions"):
+                ui.html("Cancel", tag="button", sanitize=False).classes("p2a-push").on("click", dialog.close)
+                open_button = ui.html(f"{icon('link')} Open", tag="button", sanitize=False) \
+                    .classes("p2a-push p2a-primary").on("click", submit)
+            self.fetch_dialog, self.fetch_open_button = dialog, open_button
+        dialog.on("hide", lambda: setattr(self, "fetch_status", None))
+        dialog.open()
+        ui.run_javascript("setTimeout(() => document.querySelector('.p2a-report input[type=text]')?.focus(), 100)")
+
+    def _fetch(self, source: str) -> None:
+        """Runs in a background thread: download the paper, then open it."""
+        try:
+            path = pipeline.resolve(source, lambda message, fraction: self.events.put(("fetch_progress", message)))
+        except RuntimeError as e:
+            self.events.put(("fetch_error", str(e)))
+        else:
+            self.events.put(("fetched", path, source))
 
     def _set_output(self, value: str) -> None:
         self.output_value = value
@@ -620,7 +724,8 @@ class PaperApp:
             f"- Voice: {self.voice_select.value}; speed: {self.speed_select.value}; "
             f"language model: {self.model_select.value or 'automatic'}",
             f"- Sections: {', '.join(sorted(self.sections))}",
-            f"- Input type: {self.input_path.suffix if self.input_path else 'none'}",
+            f"- Input type: {self.input_path.suffix if self.input_path else 'none'}"
+            f"{' (downloaded)' if self.input_source else ''}",
         ]
         missing = [r.title for r in self.requirements if not r.installed]
         if missing:
@@ -727,6 +832,22 @@ class PaperApp:
     def _handle_event(self, kind: str, *args) -> None:
         if kind == "options":
             self._set_options(*args)
+            return
+        if kind == "fetch_progress":
+            if self.fetch_status:
+                self.fetch_status.set_text(args[0])
+            return
+        if kind == "fetch_error":
+            if self.fetch_status:
+                self.fetch_status.set_text(f"Couldn't open it: {args[0]}")
+                _set_disabled(self.fetch_open_button, False)
+            else:
+                ui.notify(f"Couldn't open the paper: {args[0]}", type="negative", multi_line=True)
+            return
+        if kind == "fetched":
+            if self.fetch_status:
+                self.fetch_dialog.close()
+            self._set_input(*args)
             return
         if kind == "progress":
             message, fraction = args
@@ -862,6 +983,7 @@ class PaperApp:
 
 SHORTCUTS = [
     ("Open a paper", f"{_MOD}O"),
+    ("Open from arXiv, DOI or URL", f"{_SHIFT_MOD}O"),
     ("Close the window", f"{_MOD}W"),
     ("Convert to audio / stop", f"{_MOD}↩"),
     ("Zoom in / out / fit width", f"{_MOD}+  {_MOD}−  {_MOD}0"),
@@ -911,6 +1033,17 @@ def _issue_url(title: str, body: str, diagnostics: str) -> str:
         else:
             body = body[: len(body) * 2 // 3] + "\n…(shortened)"
     return build("", "")
+
+
+def _default_output(path: Path, title: str, downloaded: bool) -> Path:
+    """Where to save the audio by default: next to a local paper; for a download (which sits
+    in the cache folder), in the Downloads folder, named after the paper's title."""
+    if not downloaded:
+        return path.with_suffix(".mp3")
+    folder = Path.home() / "Downloads"
+    folder = folder if folder.is_dir() else Path.home()
+    name = re.sub(r"[^\w\s.,()-]", "", title).strip()[:80] or path.stem
+    return folder / f"{name}.mp3"
 
 
 def _pick(options: list[str], previous: str | None, default: str) -> str:

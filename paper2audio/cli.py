@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 from . import audio, config, pipeline, tts
-from .pipeline import SUPPORTED_INPUTS
 
 
 def main() -> None:
@@ -20,7 +19,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_sections_help(),
     )
-    convert.add_argument("--input", required=True, type=Path, help="file to read (.pdf, .txt or .md)")
+    convert.add_argument("--input", required=True,
+                         help="paper to read: a file (.pdf, .html, .xml, .epub, .tex, .txt, .md), a URL, "
+                              "a DOI or an arXiv ID like arxiv:1706.03762")
     convert.add_argument("--output", required=True, type=Path, help=f"audio file to write ({formats})")
     convert.add_argument("--speed", type=float, help="playback speed, e.g. 1.5 (default: 1)")
     convert.add_argument("--voice", help="phonon voice (default: Zoey)")
@@ -38,8 +39,6 @@ def main() -> None:
                          help=f"audio file to write ({formats}; default: next to the input, e.g. talk_1.5x.mp3)")
 
     args = parser.parse_args()
-    if not args.input.is_file():
-        parser.error(f"input file not found: {args.input}")
     if args.command == "convert":
         _convert(args, parser)
     else:
@@ -47,8 +46,6 @@ def main() -> None:
 
 
 def _convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    if args.input.suffix.lower() not in SUPPORTED_INPUTS:
-        parser.error(f"--input must end in one of {', '.join(SUPPORTED_INPUTS)}")
     _check_output(args.output, parser)
     try:
         settings = config.load()
@@ -65,7 +62,8 @@ def _convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda signum, frame: sys.exit(128 + signum))
     try:
-        pipeline.convert(args.input, args.output, settings)
+        path = pipeline.resolve(args.input)
+        pipeline.convert(path, args.output, settings)
     except RuntimeError as e:
         sys.exit(f"Error: {e}")
     except KeyboardInterrupt:
@@ -73,6 +71,8 @@ def _convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
 
 
 def _speedup(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if not args.input.is_file():
+        parser.error(f"input file not found: {args.input}")
     _check_speed(args.speed, parser)
     output = args.output or args.input.with_name(f"{args.input.stem}_{args.speed:g}x{args.input.suffix}")
     _check_output(output, parser)
