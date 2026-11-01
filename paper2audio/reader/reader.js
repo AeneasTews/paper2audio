@@ -147,6 +147,7 @@
         });
         if (kind === "abstract") block.prepend(el("strong", "", "Abstract. "));
         if (kind === "footnote") block.prepend(el("span", "p2a-block-label", "Footnote: "));
+        if (kind === "keywords" && !/^\s*key\s?words/i.test(text)) block.prepend(el("span", "p2a-block-label", "Keywords: "));
         doc.append(block);
       }
       if (!blocks.length) doc.append(el("p", "p2a-empty", "No readable text found in this file."));

@@ -20,13 +20,16 @@ from pathlib import Path
 # Name: (included by default, description)
 SECTIONS = {
     "title": (True, "the paper's title"),
-    "authors": (False, "authors and affiliations"),
+    "authors": (False, "authors, affiliations and notes like 'corresponding author'"),
+    "keywords": (False, "the keywords list"),
+    "metadata": (False, "article type, journal, dates, DOI, license"),
     "abstract": (True, "the abstract"),
     "figures": (True, "spoken descriptions of figures and tables"),
     "formulas": (True, "formulas, spoken in words"),
     "footnotes": (True, "footnotes"),
     "citations": (False, "in-text citations like [12] or (Smith et al., 2020)"),
     "acknowledgements": (False, "the acknowledgements"),
+    "declarations": (False, "funding, competing interests, author contributions, data availability"),
     "references": (False, "the reference list"),
     "appendix": (False, "everything after the reference list"),
     "summary": (False, "a short generated summary, read before the paper"),

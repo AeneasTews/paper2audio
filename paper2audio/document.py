@@ -17,8 +17,8 @@ from pylatexenc.latex2text import LatexNodes2Text
 from . import clean, llm
 from .progress import Progress, print_progress
 
-KINDS = ("title", "authors", "abstract", "heading", "body", "caption", "table", "equation",
-         "footnote", "references", "acknowledgements")
+KINDS = ("title", "authors", "keywords", "metadata", "abstract", "heading", "body", "caption", "table",
+         "equation", "footnote", "references", "acknowledgements", "declarations")
 CITE_START, CITE_END = "", ""
 NOTE_MARK = ""  # a footnote marker in the text, always dropped
 CITATION = re.compile(f"{CITE_START}(.*?){CITE_END}", re.DOTALL)
@@ -26,6 +26,7 @@ MATH = re.compile(r"\$(.+?)\$", re.DOTALL)
 # Math simple enough to say without a model: "x", "42", "h_{t}", "d_k"
 SIMPLE_MATH = re.compile(r"\s*([A-Za-z]|\d+(\.\d+)?)\s*(_\{?\s*([A-Za-z0-9]+)\s*\}?)?\s*")
 MATH_BATCH = 40
+CONTEXT_CHARS = 80  # of the sentence on either side of a formula, for the model
 # HTML and XML text often has spaces around markup: "Figure 1 ," -> "Figure 1,"
 SPACE_BEFORE_PUNCTUATION = re.compile(r"\s+([,.;:!?)\]])")
 # LaTeX that draws something rather than writing math (TikZ pictures, boxes), or is too long
@@ -37,7 +38,12 @@ MATH_PROMPT = """\
 Convert each LaTeX snippet from a scientific paper into how it would be read aloud in \
 plain spoken English, e.g. "\\frac{QK^T}{\\sqrt{d_k}}" -> "Q K transpose divided by the \
 square root of d k", "x_i^2" -> "x i squared". Say subscripts right after their base \
-without "sub" ("d_{model}" -> "d model"), unless that would be ambiguous. Keep numbers as digits ("10000" stays \
+without "sub" ("d_{model}" -> "d model"), unless that would be ambiguous.
+
+Each snippet is shown in its sentence, marked with ⟦ ⟧. Answer with the spoken form of \
+the marked part only, worded so the sentence still reads naturally: don't add a verb \
+when the sentence has its own, e.g. "Let ⟦F \\subseteq K⟧ be number fields" -> "F \
+subset of K", not "F is a subset of K". Keep numbers as digits ("10000" stays \
 "10000"); they are read aloud correctly later. Answer with the spoken text only."""
 TABLE_PROMPT = """\
 Describe this table from a scientific paper for a listener who can't see it, in 2 to 5 \
@@ -80,7 +86,7 @@ def to_speech(blocks: list[Block], sections: Collection[str], model: str | None,
             text = f"Footnote: {text}"
         paragraphs.append(text)
 
-    spoken = _speak_math([m.group(1) for p in paragraphs for m in MATH.finditer(p)], model, progress)
+    spoken = speak_math([(m.group(1), _context(p, m)) for p in paragraphs for m in MATH.finditer(p)], model, progress)
     paragraphs = [MATH.sub(lambda m: spoken[m.group(1)], p) for p in paragraphs]
     # Blocks are already selected; only tidy up: spaces, URLs, and no letterless lines (phonon fails on those).
     lines = [clean.normalize(SPACE_BEFORE_PUNCTUATION.sub(r"\1", " ".join(p.split()))) for p in paragraphs]
@@ -98,14 +104,19 @@ def _wanted(block: Block, sections: Collection[str]) -> bool:
         return "formulas" in sections
     if block.kind == "footnote":
         return "footnotes" in sections
-    return block.kind in sections  # title, authors, abstract, references, acknowledgements
+    return block.kind in sections  # title, authors, keywords, metadata, abstract, references, ...
 
 
-def _speak_math(snippets: list[str], model: str | None, progress: Progress = print_progress) -> dict[str, str]:
-    """Spoken form of each LaTeX snippet."""
+def speak_math(snippets: list[tuple[str, str]], model: str | None,
+               progress: Progress = print_progress) -> dict[str, str]:
+    """Spoken form of each LaTeX snippet, given as (snippet, the sentence around it).
+
+    A snippet that occurs several times is converted once, in its first context.
+    """
+    contexts = dict(reversed(snippets))  # first context wins
     spoken = {}
     hard = []
-    for snippet in dict.fromkeys(snippets):
+    for snippet in contexts:
         if DRAWING.search(snippet) or len(snippet) > MAX_MATH_LENGTH:
             spoken[snippet] = ""
         elif match := SIMPLE_MATH.fullmatch(snippet):
@@ -117,10 +128,17 @@ def _speak_math(snippets: list[str], model: str | None, progress: Progress = pri
     for start in range(0, len(hard), MATH_BATCH):
         batch = hard[start:start + MATH_BATCH]
         progress(f"Converting formulas {start + 1}-{start + len(batch)} of {len(hard)}...", start / len(hard))
-        answers = llm.generate_keyed(model, MATH_PROMPT, batch, field="spoken")
+        answers = llm.generate_keyed(model, MATH_PROMPT, [contexts[s] for s in batch], field="spoken")
         for snippet, answer in zip(batch, answers):
             spoken[snippet] = answer.strip() if answer else _latex_to_text(snippet)
     return spoken
+
+
+def _context(paragraph: str, match: re.Match, chars: int = CONTEXT_CHARS) -> str:
+    """The snippet marked with ⟦ ⟧, with the words around it (other math left as LaTeX)."""
+    before = paragraph[max(0, match.start() - chars):match.start()]
+    after = paragraph[match.end():match.end() + chars]
+    return f"…{before}⟦{match.group(1).strip()}⟧{after}…"
 
 
 def _latex_to_text(latex: str) -> str:

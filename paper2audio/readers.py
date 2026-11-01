@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from bs4 import BeautifulSoup, NavigableString, Tag
 from pylatexenc.latex2text import LatexNodes2Text
 
-from .clean import ACKNOWLEDGEMENTS_HEADING, REFERENCES_HEADING
+from .clean import ACKNOWLEDGEMENTS_HEADING, DECLARATIONS_HEADING, REFERENCES_HEADING
 from .document import CITE_END, CITE_START, NOTE_MARK, Block
 
 APPENDIX_HEADING = re.compile(r"^\s*(appendix|appendices|supplementary|supporting information)\b", re.IGNORECASE)
@@ -32,6 +32,8 @@ class _Sections:
             self.kind = "references"
         elif ACKNOWLEDGEMENTS_HEADING.match(text):
             self.kind = "acknowledgements"
+        elif DECLARATIONS_HEADING.match(text):
+            self.kind = "declarations"
         else:
             self.kind = None
             self.appendix = self.appendix or bool(APPENDIX_HEADING.match(text))
@@ -42,8 +44,8 @@ class _Sections:
             return None
         if self.kind and kind in ("body", "footnote"):
             kind = self.kind
-        # References and acknowledgements are their own sections, wherever they appear.
-        appendix = self.appendix and kind not in ("references", "acknowledgements")
+        # These are their own sections, wherever they appear.
+        appendix = self.appendix and kind not in ("references", "acknowledgements", "declarations")
         return Block(kind, text, appendix=appendix)
 
 
@@ -84,7 +86,7 @@ class _HtmlReader:
         self.forced_kind: str | None = None  # inside the abstract, authors, bibliography...
 
     def add(self, kind: str, text: str) -> None:
-        if self.forced_kind and kind in ("body", "heading"):
+        if self.forced_kind and kind in ("body", "heading", "keywords"):
             kind = self.forced_kind
         if block := self.sections.block(kind, text):
             self.blocks.append(block)
@@ -107,6 +109,8 @@ class _HtmlReader:
                 self.sections.heading(text)
                 if self.forced_kind is None:
                     self.add("heading", text)
+        elif classes & {"ltx_keywords", "keywords", "kwd-group"}:
+            self.add("keywords", el.get_text(" "))
         elif "ltx_authors" in classes:
             self.add("authors", el.get_text(" "))
         elif "ltx_abstract" in classes or el.get("id") == "abstract" or "abstract" in classes:
@@ -170,6 +174,11 @@ def _table_text(table: Tag) -> str:
 # --- JATS XML (PubMed Central, Europe PMC, PLOS, eLife, ...) -------------------------
 
 MML = "{http://www.w3.org/1998/Math/MathML}"
+# JATS footnote and section types for declarations (funding, competing interests, ...)
+DECLARATION_FOOTNOTES = {"conflict", "coi-statement", "financial-disclosure", "con", "supported-by",
+                         "data-availability", "supplementary-material"}
+DECLARATION_SECTIONS = {"data-availability", "funding-information", "COI-statement", "author-contributions",
+                        "ethics-statement"}
 
 
 def read_jats(xml: str) -> list[Block]:
@@ -189,6 +198,10 @@ def read_jats(xml: str) -> list[Block]:
                  for c in meta.iter("contrib") if c.get("contrib-type") == "author"]
         affiliations = [_jats_text(a)[0] for a in meta.iter("aff")]
         add("authors", ", ".join(n for n in names if n.strip()) + (". " + " ".join(affiliations) if affiliations else ""))
+        if keywords := [_jats_text(k)[0] for group in meta.iter("kwd-group") for k in group.iter("kwd")]:
+            add("keywords", "Keywords: " + ", ".join(keywords))
+        for funding in meta.iter("funding-statement"):
+            add("declarations", _jats_text(funding)[0])
         for abstract in meta.findall("abstract"):
             for el in abstract.iter():
                 if el.tag == "p":
@@ -217,7 +230,8 @@ def read_jats(xml: str) -> list[Block]:
                     for p in item.findall("p"):
                         add(kind, _jats_text(p)[0])
             elif tag == "fn":
-                add("footnote", " ".join(_jats_text(p)[0] for p in child.iter("p")))
+                declaration = child.get("fn-type") in DECLARATION_FOOTNOTES
+                add("declarations" if declaration else "footnote", " ".join(_jats_text(p)[0] for p in child.iter("p")))
             elif tag == "ref-list":
                 sections.kind = None
                 for ref in child.iter("ref"):
@@ -228,6 +242,8 @@ def read_jats(xml: str) -> list[Block]:
             elif tag in ("app", "app-group"):
                 sections.appendix = True
                 walk(child, kind)
+            elif tag == "sec" and child.get("sec-type") in DECLARATION_SECTIONS:
+                walk(child, "declarations")
             elif tag in ("sec", "boxed-text", "fn-group", "notes", "back", "body", "def-list"):
                 walk(child, kind)
 
