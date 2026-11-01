@@ -10,19 +10,27 @@ paper2audio convert --input=paper.pdf --output=paper.mp3
 
 ## Requirements
 
+- macOS or Linux
 - Python 3.10+
-- [uv](https://docs.astral.sh/uv/)
-- [ollama](https://ollama.com) with the `phonon` model pulled (`ollama pull phonon`)
+- [ollama](https://ollama.com) with the `phonon` model, and [uv](https://docs.astral.sh/uv/). `setup.sh` installs these if they're missing.
 
 ## Installation
 
 From the project folder:
 
 ```sh
-uv tool install -e .
+./setup.sh
 ```
 
-This puts the `paper2audio` command on your `PATH`. Because it's an editable install, changes to the code take effect immediately.
+The script is safe to re-run; anything already set up is skipped. It:
+
+1. installs ollama with the [official installer](https://ollama.com/download) if the `ollama` command isn't found
+2. starts the ollama server if it isn't running
+3. downloads the `phonon` model if it isn't there yet
+4. installs uv with its official installer if it's missing
+5. installs the `paper2audio` command (`uv tool install --editable .`), so changes to the code take effect immediately
+
+If you already have everything, `uv tool install -e .` on its own is enough.
 
 Alternatively, run it without installing via `uv run paper2audio ...` from the project folder.
 
@@ -66,8 +74,9 @@ As a rough guide, a 15-page paper becomes about 30 minutes of audio and takes ar
    - strips citation markers like `[13]`, URLs, email addresses and footnote symbols (`∗ † ‡`)
    - removes lines without any letters (page numbers, `_____` separators)
    - rejoins words hyphenated across line breaks and glues lines back into paragraphs
-3. **Speak** (`paper2audio/tts.py`): sends the text to `ollama run phonon` in chunks of about 4,000 characters and stitches the audio together. If phonon rejects a chunk, that chunk is skipped instead of failing the whole run.
-4. **Save** (`paper2audio/audio.py`): writes WAV, or encodes MP3 at 64 kbps with [lameenc](https://github.com/chrisstaite/lameenc). ffmpeg is not needed.
+3. **Server** (`paper2audio/server.py`): if no ollama server is running, starts `ollama serve` for the duration of the run and shuts it down afterwards, also on Ctrl+C. An already-running server (e.g. the Ollama desktop app) is used and left alone.
+4. **Speak** (`paper2audio/tts.py`): sends the text to `ollama run phonon` in chunks of about 4,000 characters and stitches the audio together. If phonon rejects a chunk, that chunk is skipped instead of failing the whole run.
+5. **Save** (`paper2audio/audio.py`): writes WAV, or encodes MP3 at 64 kbps with [lameenc](https://github.com/chrisstaite/lameenc). ffmpeg is not needed.
 
 ## Known limitations
 

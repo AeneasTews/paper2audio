@@ -1,10 +1,11 @@
 """Command line interface: paper2audio convert --input=paper.pdf --output=paper.mp3"""
 
 import argparse
+import signal
 import sys
 from pathlib import Path
 
-from . import audio, clean, extract, tts
+from . import audio, clean, extract, server, tts
 
 
 def main() -> None:
@@ -26,10 +27,17 @@ def main() -> None:
     if not text:
         sys.exit("No readable text found in the PDF (is it a scanned image?)")
 
+    # Turn kill / closed-terminal signals into a normal exit, so a temporary ollama
+    # server gets shut down instead of being left running.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda signum, frame: sys.exit(128 + signum))
     try:
-        result = tts.synthesize(text, args.voice)
+        with server.ollama_server():
+            result = tts.synthesize(text, args.voice)
     except RuntimeError as e:
         sys.exit(f"Error: {e}")
+    except KeyboardInterrupt:
+        sys.exit("Interrupted")
     audio.save(result, args.output)
     minutes = len(result.pcm) / (2 * result.channels * result.sample_rate) / 60
     print(f"Wrote {args.output} ({minutes:.1f} min)", file=sys.stderr)
