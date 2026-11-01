@@ -35,12 +35,13 @@ try:
 except ImportError as e:  # GUI extras are optional; the CLI works without them
     sys.exit(f"The GUI needs extra packages ({e.name}). Install them with: uv tool install -e '.[gui]'")
 
-from . import annotations, audio, describe, models, pipeline, requirements, server, tts
+from . import annotations, audio, config, hardware, models, pipeline, requirements, server, tts
 from .setup_dialog import SetupDialog
 
 READER_DIR = Path(__file__).parent / "reader"
 MAX_RENDER_WIDTH = 8192  # pixels; enough for 400% zoom on a Retina screen
-NO_VISION_MODEL = "No vision model installed"
+SPEEDS = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+NO_MODEL = "none"  # the rule-based cleanup, without a language model
 ISSUES_URL = "https://github.com/AeneasTews/paper2audio/issues/new"
 MAX_ISSUE_URL = 7500  # browsers and GitHub reject much longer URLs
 
@@ -271,7 +272,7 @@ def _head_html() -> str:
 class NativeSelect:
     """An HTML <select>; looks like the system's own popup menu in the web view."""
 
-    def __init__(self, options: list[str], value: str, on_change=None):
+    def __init__(self, options: list, value: str, on_change=None):
         self.value = value
         self._on_change = on_change
         self.element = ui.element("select")
@@ -283,14 +284,22 @@ class NativeSelect:
         if self._on_change:
             self._on_change()
 
-    def set_options(self, options: list[str], value: str) -> None:
+    def options_label(self) -> str:
+        """The label of the selected option."""
+        return self._labels.get(self.value, self.value)
+
+    def set_options(self, options: list, value: str) -> None:
+        """options: values, or (value, label) pairs."""
         self.value = value
+        self._labels = {}
         self.element.clear()
         with self.element:
             for option in options:
-                item = TextElement(tag="option", text=option)
-                item.props["value"] = option
-                if option == value:
+                option_value, label = option if isinstance(option, tuple) else (option, option)
+                self._labels[option_value] = label
+                item = TextElement(tag="option", text=label)
+                item.props["value"] = option_value
+                if option_value == value:
                     item.props["selected"] = True
 
 
@@ -334,7 +343,8 @@ class PaperApp:
         self.options_loader: threading.Thread | None = None
         self.input_path: Path | None = initial_file
         self.output_path: Path | None = None
-        self.vision_models: list[str] = []
+        self.language_models: list[str] = []
+        self.recommended_model: str | None = None
         self.requirements: list[requirements.Requirement] = []
         self.setup_prompted = False  # the setup dialog opens by itself only once per window
         self.open_setup_after_load = False
@@ -344,6 +354,14 @@ class PaperApp:
     # --- layout ------------------------------------------------------------------------
 
     def build(self) -> None:
+        # Defaults from the config file (~/.config/paper2audio/config.toml), like the CLI.
+        try:
+            self.defaults = config.load()
+            config_problem = ""
+        except ValueError as e:
+            self.defaults = config.Settings()
+            config_problem = f"Config file ignored: {e}"
+        self.sections = set(self.defaults.sections)
         ui.add_head_html(_head_html())
         with ui.element("div").props("id=p2a-app"):
             ui.html(TOP_HTML, sanitize=False).style("display: contents")
@@ -366,6 +384,8 @@ class PaperApp:
                 "P2A.showMessage('file-text', 'Open a PDF, text or Markdown file to start.')"), once=True)
         self._update_state()
         self._refresh_options()
+        if config_problem:
+            ui.notify(config_problem, type="warning", multi_line=True, timeout=0, close_button=True)
 
     def _build_pane(self) -> None:
         with ui.element("div").props("id=p2a-pane"):
@@ -377,15 +397,13 @@ class PaperApp:
                 audio_section = Section("p2a-sec-audio", "Audio", "audio-lines")
                 with audio_section.body:
                     with _row("Voice"):
-                        self.voice_select = NativeSelect([tts.DEFAULT_VOICE], tts.DEFAULT_VOICE)
-                    with _row("Figures"):
-                        with ui.element("label").classes("p2a-check"):
-                            self.images_box = ui.element("input").props("type=checkbox checked")
-                            self.images_box.on("change", self._images_changed, js_handler="(e) => emit(e.target.checked)")
-                            self.images_checked = True
-                            ui.label("Describe figures")
-                    with _row("Vision model"):
-                        self.vision_select = NativeSelect([NO_VISION_MODEL], NO_VISION_MODEL)
+                        self.voice_select = NativeSelect([self.defaults.voice], self.defaults.voice)
+                    with _row("Speed"):
+                        speeds = sorted(set(SPEEDS) | {float(self.defaults.speed)})
+                        self.speed_select = NativeSelect([(f"{v:g}", f"{v:g}×") for v in speeds], f"{self.defaults.speed:g}")
+                    with _row("Language model"):
+                        self.model_select = NativeSelect(self._model_options(), self._default_model_value(),
+                                                         on_change=self._update_state)
                     self.hint = ui.label("").classes("p2a-hint")
                     with _row("Save as"):
                         self.output_input = ui.element("input").props('type=text placeholder="paper.mp3"')
@@ -399,6 +417,22 @@ class PaperApp:
                     with ui.element("div").classes("p2a-progress"):
                         self.progress_bar = ui.element("div").style("width: 0%")
                     self.status = ui.label("").classes("p2a-status")
+
+                sections_section = Section("p2a-sec-sections", "Sections", "list-tree")
+                with sections_section.body:
+                    ui.label("What to read aloud. Some need a language model.").classes("p2a-hint")
+                    self.section_boxes = {}
+                    for name, (_, description) in config.SECTIONS.items():
+                        with ui.element("label").classes("p2a-check p2a-section-option"):
+                            box = ui.element("input").props("type=checkbox")
+                            box.props["checked"] = name in self.defaults.sections
+                            box.on("change", lambda e, name=name: self._section_changed(name, e.args),
+                                   js_handler="(e) => emit(e.target.checked)")
+                            self.section_boxes[name] = box
+                            with ui.element("span"):
+                                ui.label(name.capitalize()).classes("p2a-section-name")
+                                ui.label(description + (" (needs a language model)" if name in config.LLM_ONLY_SECTIONS else ""))\
+                                    .classes("p2a-hint")
 
                 self.output_section = Section("p2a-sec-output", "Output", "file-text")
                 with self.output_section.body:
@@ -474,9 +508,36 @@ class PaperApp:
     def _output_changed(self, event) -> None:
         self.output_value = event.args
 
-    def _images_changed(self, event) -> None:
-        self.images_checked = bool(event.args)
-        self._update_state()
+    def _section_changed(self, name: str, checked) -> None:
+        (self.sections.add if checked else self.sections.discard)(name)
+
+    def _default_model_value(self) -> str:
+        """The configured model, "none", or "" for picking one automatically."""
+        return self.defaults.llm_model or ""
+
+    def _model_options(self) -> list[tuple[str, str]]:
+        if self.recommended_model is None:
+            automatic = "Automatic"
+        else:
+            candidates = hardware.MODELS[hardware.MODELS.index(self.recommended_model):]
+            picked = next((m for m in candidates if any(m == n.removesuffix(":latest") or m == n
+                                                        for n in self.language_models)), None)
+            automatic = f"Automatic ({picked})" if picked else "Automatic (none installed)"
+        options = [("", automatic)]
+        options += [(name, name) for name in self.language_models]
+        configured = self.defaults.llm_model
+        if configured and configured != NO_MODEL and configured not in self.language_models:
+            options.append((configured, f"{configured} (not installed)"))
+        options.append((NO_MODEL, "None (rule-based cleanup)"))
+        return options
+
+    def _settings(self) -> config.Settings:
+        return config.Settings(
+            voice=self.voice_select.value,
+            speed=float(self.speed_select.value),
+            llm_model=self.model_select.value or None,
+            sections=set(self.sections),
+        )
 
     async def _choose_output(self) -> None:
         current = Path(self.output_value) if self.output_value else None
@@ -556,8 +617,9 @@ class PaperApp:
             f"- OS: {platform.platform()}",
             f"- Python: {platform.python_version()}",
             f"- ollama: {ollama}",
-            f"- Voice: {self.voice_select.value}; vision model: "
-            f"{self.vision_select.value if self.images_checked and self.vision_models else 'off'}",
+            f"- Voice: {self.voice_select.value}; speed: {self.speed_select.value}; "
+            f"language model: {self.model_select.value or 'automatic'}",
+            f"- Sections: {', '.join(sorted(self.sections))}",
             f"- Input type: {self.input_path.suffix if self.input_path else 'none'}",
         ]
         missing = [r.title for r in self.requirements if not r.installed]
@@ -599,7 +661,7 @@ class PaperApp:
         dialog.open()
 
     def _start(self, output_path: Path) -> None:
-        vision_model = self.vision_select.value if self.images_checked and self.vision_models else None
+        settings = self._settings()
         self.output_path = output_path
         self.cancel.clear()
         self.log_lines = []
@@ -608,7 +670,7 @@ class PaperApp:
         self.output_section.element.set_visibility(False)
         self.worker = threading.Thread(
             target=self._run,
-            args=(self.input_path, output_path, self.voice_select.value, vision_model),
+            args=(self.input_path, output_path, settings),
             daemon=True,
         )
         self.worker.start()
@@ -626,7 +688,7 @@ class PaperApp:
             return f"The folder {output_path.parent} doesn't exist."
         return None
 
-    def _run(self, input_path: Path, output_path: Path, voice: str, vision_model: str | None) -> None:
+    def _run(self, input_path: Path, output_path: Path, settings: config.Settings) -> None:
         """Runs in the worker thread; talks to the UI only through the event queue."""
 
         def progress(message: str, fraction: float | None) -> None:
@@ -635,7 +697,7 @@ class PaperApp:
             self.events.put(("progress", message, fraction))
 
         try:
-            minutes = pipeline.convert(input_path, output_path, voice, vision_model, progress)
+            minutes = pipeline.convert(input_path, output_path, settings, progress)
         except Cancelled:
             self.events.put(("cancelled",))
         except RuntimeError as e:
@@ -677,7 +739,8 @@ class PaperApp:
         self.worker = None
         if kind == "done":
             self._set_progress(1)
-            self.status.set_text(f"Done: {args[0]:.1f} minutes of audio.")
+            whole_minutes, seconds = divmod(round(args[0] * 60), 60)
+            self.status.set_text(f"Done: {whole_minutes}:{seconds:02d} of audio.")
             token = secrets.token_urlsafe(8)
             _audio_files.clear()
             _audio_files[token] = self.output_path
@@ -704,13 +767,13 @@ class PaperApp:
     def _update_state(self) -> None:
         busy, loading = self._busy(), self._loading_options()
         locked = busy or loading
-        is_pdf = self.input_path is None or self.input_path.suffix.lower() == ".pdf"
-        has_vision = bool(self.vision_models)
         _set_disabled(self.output_input, busy)
         _set_disabled(self.output_button, busy)
         _set_disabled(self.voice_select.element, locked)
-        _set_disabled(self.images_box, locked or not has_vision or not is_pdf)
-        _set_disabled(self.vision_select.element, locked or not has_vision or not is_pdf or not self.images_checked)
+        _set_disabled(self.speed_select.element, busy)
+        _set_disabled(self.model_select.element, locked)
+        for box in self.section_boxes.values():
+            _set_disabled(box, busy)
         # Converting while the options load or setup runs could race with the ollama server.
         _set_disabled(self.convert_button, not busy and (loading or self.setup.running))
         label = f"{icon('square')} Stop" if busy else f"{icon('audio-lines')} Convert to audio"
@@ -738,7 +801,7 @@ class PaperApp:
             self._refresh_options()
 
     def _refresh_options(self) -> None:
-        """Check the setup and ask ollama for vision models and phonon's voices, in the background."""
+        """Check the setup and ask ollama for language models and phonon's voices, in the background."""
         if self._loading_options() or self._busy():
             return
         self.hint.set_text("Checking ollama, voices and models…")
@@ -749,9 +812,10 @@ class PaperApp:
     def _load_options(self) -> None:
         """Runs in a background thread; starts a temporary ollama server if none is running."""
         voices: list[str] = []
-        vision: list[str] = []
+        language_models: list[str] = []
         problems: list[str] = []
         reqs: list[requirements.Requirement] | None = None
+        recommended = hardware.recommended_model()
         try:
             with server.ollama_server(lambda message, fraction: None):
                 reqs = requirements.check()
@@ -760,7 +824,7 @@ class PaperApp:
                 except RuntimeError:
                     problems.append(f"The {tts.MODEL} speech model isn't installed. Use the setup button (wrench) in the toolbar.")
                 try:
-                    vision = models.vision_models()
+                    language_models = models.language_models()
                 except RuntimeError as e:
                     problems.append(f"Couldn't list models ({e}).")
         except FileNotFoundError:
@@ -769,10 +833,10 @@ class PaperApp:
             problems.append(f"Couldn't reach ollama: {e}")
         if reqs is None:
             reqs = requirements.check()
-        self.events.put(("options", voices, vision, problems, reqs))
+        self.events.put(("options", voices, language_models, recommended, problems, reqs))
 
-    def _set_options(self, voices: list[str], vision: list[str], problems: list[str],
-                     reqs: list[requirements.Requirement]) -> None:
+    def _set_options(self, voices: list[str], language_models: list[str], recommended: str | None,
+                     problems: list[str], reqs: list[requirements.Requirement]) -> None:
         self.options_loader = None
         self.requirements = reqs
         missing = any(not r.installed for r in reqs)
@@ -781,27 +845,19 @@ class PaperApp:
             self.open_setup_after_load = False
             self.setup.show(reqs)
 
-        voices = voices or [tts.DEFAULT_VOICE]  # phonon's documented voice, if listing failed
-        self.voice_select.set_options(voices, _pick(voices, self.voice_select.value, tts.DEFAULT_VOICE))
+        voices = voices or [self.defaults.voice]  # the configured voice, if listing failed
+        self.voice_select.set_options(voices, _pick(voices, self.voice_select.value, self.defaults.voice))
 
-        had_models = bool(self.vision_models)
-        self.vision_models = vision
-        if vision:
-            self.vision_select.set_options(vision, _pick(vision, self.vision_select.value, describe.DEFAULT_MODEL))
-            if not had_models:
-                self._set_images_checked(True)
-        else:
-            self.vision_select.set_options([NO_VISION_MODEL], NO_VISION_MODEL)
-            self._set_images_checked(False)
-            if not problems:
-                problems.append("To describe figures, install a vision model with the setup button (wrench) in the toolbar.")
+        self.language_models = language_models
+        self.recommended_model = recommended
+        options = self._model_options()
+        current = self.model_select.value
+        self.model_select.set_options(options, current if any(v == current for v, _ in options) else "")
+        if self.model_select.options_label().startswith("Automatic (none") and not problems:
+            problems.append("No language model installed: formulas and figures are skipped. "
+                            "Use the setup button (wrench) in the toolbar to install one.")
         self.hint.set_text("\n".join(problems))
         self._update_state()
-
-    def _set_images_checked(self, checked: bool) -> None:
-        self.images_checked = checked
-        self.images_box.props["checked"] = checked
-        self.images_box.update()
 
 
 SHORTCUTS = [

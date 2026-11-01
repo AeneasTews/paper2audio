@@ -301,3 +301,9 @@ kbd {
   color: var(--p2a-text); background: var(--p2a-surface); border: 1px solid var(--p2a-border);
   border-bottom-width: 2px; border-radius: 5px;
 }
+
+/* Sections to read, in the right pane */
+.p2a-section-option { align-items: flex-start !important; gap: 8px !important; padding: 2px 0; }
+.p2a-section-option input { margin-top: 3px !important; }
+.p2a-section-option .p2a-section-name { font-weight: 500; }
+.p2a-section-option .p2a-hint { line-height: 1.3; }

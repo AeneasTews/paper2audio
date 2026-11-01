@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 from nicegui import ui
 
-from . import requirements
+from . import requirements, tts
 from .requirements import Requirement
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -200,7 +200,9 @@ class SetupDialog:
 
     def _start(self) -> None:
         try:
-            self._process = requirements.start_setup(self._to_install())
+            # setup.sh always installs phonon; the language model only if it's still ticked.
+            language_model = next((m for m in self._to_install() if m != tts.MODEL), None)
+            self._process = requirements.start_setup(language_model)
         except (RuntimeError, OSError) as e:
             self._state = "failed"
             self._output_tail = [str(e)]

@@ -1,25 +1,24 @@
 """Ask ollama which models and voices are available, e.g. to offer them in the GUI."""
 
-from .server import api
+from . import llm, tts
 
 
-def vision_models() -> list[str]:
-    """Names of the installed models that can read images, e.g. 'gemma3:latest'."""
-    names = sorted(model["name"] for model in api("/api/tags").get("models", []))
-    return [name for name in names if "vision" in _capabilities(name)]
+def language_models() -> list[str]:
+    """Installed models that can generate text and could read the pages, e.g. 'gemma4:12b'."""
+    names = [n for n in llm.model_names() if n.split(":")[0] != tts.MODEL]
+    return [n for n in names if "completion" in _capabilities(n)]
 
 
 def voices(model: str) -> list[str]:
     """Voices of a speech model like phonon, as listed by `ollama show`."""
-    info = api("/api/show", {"model": model})
-    return sorted(_names(info.get("voices")), key=str.lower)
+    return sorted(_names(llm.show(model).get("voices")), key=str.lower)
 
 
-def _capabilities(model: str) -> list[str]:
+def _capabilities(model: str) -> frozenset[str]:
     try:
-        return api("/api/show", {"model": model}).get("capabilities") or []
+        return llm.capabilities(model)
     except RuntimeError:  # e.g. a model that was removed in the meantime
-        return []
+        return frozenset()
 
 
 def _names(entries) -> list[str]:
