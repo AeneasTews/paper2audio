@@ -9,21 +9,75 @@ from collections import Counter
 REFERENCES_HEADING = re.compile(r"^\s*(\d+\.?\s*)?(references|bibliography)\s*$", re.IGNORECASE)
 # Numeric citations: [13], [ 35, 2, 5], [1–5]
 CITATION = re.compile(r"\s*\[\s*\d+(\s*[,–-]\s*\d+)*\s*\]")
-URL = re.compile(r"(https?://|www\.)\S+")
+URL = re.compile(r"(https?://|www\.)\S+?(?=[.,;:!?)]*(\s|$))")  # keep trailing punctuation
 EMAIL = re.compile(r"\S+@\S+\.\S+")
 SENTENCE_END = (".", "!", "?", ":")
 
+# Markdown syntax
+MD_FRONT_MATTER = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
+MD_CODE_BLOCK = re.compile(r"^(```|~~~).*?^\1[^\n]*$", re.DOTALL | re.MULTILINE)
+MD_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+MD_TABLE_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+MD_LINK_DEFINITION = re.compile(r"^\s*\[[^\]]+\]:\s*\S+")
+MD_BLOCK_START = re.compile(r"^\s*(#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)")
+MD_INLINE = [
+    (re.compile(r"!\[[^\]]*\]\([^)]*\)"), ""),  # images
+    (re.compile(r"\[([^\]]+)\]\([^)]*\)"), r"\1"),  # [text](url)
+    (re.compile(r"\[([^\]]+)\]\[[^\]]*\]"), r"\1"),  # [text][ref]
+    (re.compile(r"<[^>\n]+>"), ""),  # HTML tags
+    (re.compile(r"`([^`]*)`"), r"\1"),  # inline code
+    (re.compile(r"(\*\*|__)(.+?)\1"), r"\2"),  # bold
+    (re.compile(r"(?<!\w)([*_])(\S(?:.*?\S)?)\1(?!\w)"), r"\2"),  # italic, not snake_case
+    (re.compile(r"~~(.+?)~~"), r"\1"),  # strikethrough
+]
+
 
 def clean_pages(pages: list[str]) -> str:
-    """Return cleaned text with one paragraph per line."""
+    """Clean text extracted from PDF pages. Returns one paragraph per line."""
     pages = [unicodedata.normalize("NFKC", p) for p in pages]  # also expands ligatures like "ﬁ"
     lines = _drop_repeated_lines(pages)
     lines = _cut_references(lines)
+    return "\n".join(_join_paragraphs(_clean_lines(lines)))
+
+
+def clean_text(text: str) -> str:
+    """Clean a plain text file, where blank lines separate paragraphs. Returns one paragraph per line."""
+    text = unicodedata.normalize("NFKC", text)
+    # Unwrap hard-wrapped paragraphs: join the lines between blank lines.
+    paragraphs = [" ".join(p.split()) for p in re.split(r"\n\s*\n", text)]
+    return "\n".join(_clean_lines(_cut_references(paragraphs)))
+
+
+def clean_markdown(text: str) -> str:
+    """Strip Markdown syntax, keeping the readable text. Returns one paragraph per line."""
+    text = MD_FRONT_MATTER.sub("", text)
+    text = MD_CODE_BLOCK.sub("\n", text)  # code doesn't make sense read aloud
+    text = MD_HTML_COMMENT.sub("", text)
+    lines = []
+    for line in text.splitlines():
+        if MD_TABLE_SEPARATOR.match(line) or MD_LINK_DEFINITION.match(line):
+            continue
+        # Headings, list items, quotes and table rows each become a paragraph of their own,
+        # so list items aren't read as one run-on sentence.
+        block_start = MD_BLOCK_START.match(line)
+        if block_start or line.lstrip().startswith("|"):
+            lines.append("")
+            line = line[block_start.end():] if block_start else re.sub(r"\s*\|\s*", ", ", line.strip().strip("|"))
+        lines.append(_strip_inline_markdown(line))
+    return clean_text("\n".join(lines))
+
+
+def _strip_inline_markdown(line: str) -> str:
+    for pattern, replacement in MD_INLINE:
+        line = pattern.sub(replacement, line)
+    return line
+
+
+def _clean_lines(lines: list[str]) -> list[str]:
     lines = [_clean_line(line) for line in lines]
     # Lines without any letters (page numbers, "_____" separators, table digits) are
     # unspeakable, and phonon fails the whole input if a paragraph has nothing to say.
-    lines = [line for line in lines if re.search(r"[^\W\d_]", line)]
-    return "\n".join(_join_paragraphs(lines))
+    return [line for line in lines if re.search(r"[^\W\d_]", line)]
 
 
 def _drop_repeated_lines(pages: list[str]) -> list[str]:
