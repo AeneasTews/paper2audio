@@ -2,11 +2,12 @@
 
 import hashlib
 import io
-import sys
 from pathlib import Path
 
 from PIL import Image
 from pypdf import PdfReader
+
+from .progress import Progress, print_progress
 
 # Images smaller than this (in pixels, either side) are icons, bullets or rules, not figures.
 MIN_IMAGE_SIDE = 100
@@ -19,7 +20,7 @@ def extract_pages(pdf_path: Path) -> list[str]:
     return [page.extract_text() or "" for page in reader.pages]
 
 
-def extract_images(pdf_path: Path) -> list[list[bytes]]:
+def extract_images(pdf_path: Path, progress: Progress = print_progress) -> list[list[bytes]]:
     """Return the embedded raster images of each page as PNG bytes.
 
     Tiny images are skipped, and so are repeats of an image already seen on an earlier
@@ -33,13 +34,13 @@ def extract_images(pdf_path: Path) -> list[list[bytes]]:
         try:
             page_images = list(page.images)
         except Exception as e:  # malformed resources shouldn't stop the text from being read
-            print(f"  warning: could not read images on page {page_number}: {e}", file=sys.stderr)
+            progress(f"  warning: could not read images on page {page_number}: {e}", None)
             page_images = []
         for image_file in page_images:
             try:
                 png = _to_png(image_file.image, seen)
             except Exception as e:  # unsupported encodings, broken streams
-                print(f"  warning: skipping image {image_file.name} on page {page_number}: {e}", file=sys.stderr)
+                progress(f"  warning: skipping image {image_file.name} on page {page_number}: {e}", None)
                 continue
             if png is not None:
                 images.append(png)

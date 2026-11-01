@@ -5,8 +5,12 @@ description = "Turn scientific papers (PDF) into audio files using ollama's phon
 requires-python = ">=3.10"
 dependencies = ["pypdf>=5", "lameenc>=1.7", "pillow>=10"]
 
+[project.optional-dependencies]
+gui = ["nicegui>=2.10", "pywebview>=5", "pypdfium2>=4"]
+
 [project.scripts]
 paper2audio = "paper2audio.cli:main"
+paper2audio-gui = "paper2audio.gui:main"
 
 [build-system]
 requires = ["hatchling"]

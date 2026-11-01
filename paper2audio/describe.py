@@ -1,16 +1,11 @@
 """Describe figures with a local ollama vision model, so they can be read aloud."""
 
 import base64
-import json
-import sys
-import urllib.error
-import urllib.request
 
-from .server import server_url
+from .progress import Progress, print_progress
+from .server import api
 
 DEFAULT_MODEL = "gemma3"
-# Loading the model and describing a large figure can take a while on a laptop.
-TIMEOUT = 300  # seconds
 # The model answers with this for logos, decorations and other images not worth describing.
 SKIP = "SKIP"
 PROMPT = f"""\
@@ -26,7 +21,7 @@ If the image is only a logo, icon, photo of an author, or decoration that adds n
 to the paper's content, reply with exactly {SKIP}."""
 
 
-def describe_images(images: list[bytes], model: str) -> list[str | None]:
+def describe_images(images: list[bytes], model: str, progress: Progress = print_progress) -> list[str | None]:
     """Describe each PNG image. Returns None for images that were skipped or failed."""
     if not images:
         return []
@@ -34,16 +29,16 @@ def describe_images(images: list[bytes], model: str) -> list[str | None]:
     descriptions: list[str | None] = []
     try:
         for i, image in enumerate(images, 1):
-            print(f"Describing image {i}/{len(images)}...", file=sys.stderr)
-            descriptions.append(_describe(image, model))
+            progress(f"Describing image {i}/{len(images)}...", (i - 1) / len(images))
+            descriptions.append(_describe(image, model, progress))
     finally:
         _unload(model)  # free the memory for phonon
     return descriptions
 
 
-def _describe(image: bytes, model: str) -> str | None:
+def _describe(image: bytes, model: str, progress: Progress) -> str | None:
     try:
-        response = _post("/api/generate", {
+        response = api("/api/generate", {
             "model": model,
             "prompt": PROMPT,
             "images": [base64.b64encode(image).decode()],
@@ -51,18 +46,18 @@ def _describe(image: bytes, model: str) -> str | None:
             "options": {"temperature": 0.2},
         })
     except RuntimeError as e:  # one unreadable image shouldn't fail the whole paper
-        print(f"  skipped ({e})", file=sys.stderr)
+        progress(f"  skipped ({e})", None)
         return None
     text = response.get("response", "").strip()
     if not text or text.strip(" .").upper() == SKIP:
-        print("  skipped (not a figure)", file=sys.stderr)
+        progress("  skipped (not a figure)", None)
         return None
     return text
 
 
 def _check_model(model: str) -> None:
     try:
-        info = _post("/api/show", {"model": model})
+        info = api("/api/show", {"model": model})
     except RuntimeError as e:
         if "not found" in str(e):
             raise RuntimeError(
@@ -77,25 +72,6 @@ def _check_model(model: str) -> None:
 
 def _unload(model: str) -> None:
     try:
-        _post("/api/generate", {"model": model, "keep_alive": 0})
+        api("/api/generate", {"model": model, "keep_alive": 0})
     except RuntimeError:
         pass  # ollama unloads idle models by itself after a few minutes anyway
-
-
-def _post(path: str, payload: dict) -> dict:
-    request = urllib.request.Request(
-        server_url().rstrip("/") + path,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-            return json.loads(response.read())
-    except urllib.error.HTTPError as e:
-        try:
-            message = json.loads(e.read()).get("error", str(e))
-        except ValueError:
-            message = str(e)
-        raise RuntimeError(f"ollama: {message}") from None
-    except (OSError, ValueError) as e:  # connection problems, timeouts, bad JSON
-        raise RuntimeError(f"ollama: {e}") from None
