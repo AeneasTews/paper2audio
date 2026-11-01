@@ -16,7 +16,14 @@ if [ "${1:-}" = "--no-command" ]; then
     INSTALL_COMMAND=0
     shift
 fi
-PYTHON=${PAPER2AUDIO_PYTHON:-uv run --quiet python}
+# Runs Python with paper2audio installed (a function, so a path with spaces works).
+run_python() {
+    if [ -n "${PAPER2AUDIO_PYTHON:-}" ]; then
+        "$PAPER2AUDIO_PYTHON" "$@"
+    else
+        uv run --quiet python "$@"
+    fi
+}
 
 status() { echo ">>> $*"; }
 available() { command -v "$1" >/dev/null 2>&1; }
@@ -75,7 +82,7 @@ pull() {
     fi
 }
 
-RECOMMENDED=$($PYTHON -m paper2audio.hardware)
+RECOMMENDED=$(run_python -m paper2audio.hardware)
 LLM_MODEL=${1:-}
 if [ -z "$LLM_MODEL" ] && [ -t 0 ]; then
     echo
@@ -94,7 +101,7 @@ LLM_MODEL=${LLM_MODEL:-${RECOMMENDED:-none}}
 pull phonon
 if [ "$LLM_MODEL" != none ]; then
     pull "$LLM_MODEL"
-    case " $($PYTHON -c 'from paper2audio.hardware import MODELS; print(*MODELS)') " in
+    case " $(run_python -c 'from paper2audio.hardware import MODELS; print(*MODELS)') " in
         *" $LLM_MODEL "*) ;;  # picked automatically at runtime
         *) status "To use $LLM_MODEL, pass --llm-model=$LLM_MODEL or set llm_model in ~/.config/paper2audio/config.toml" ;;
     esac

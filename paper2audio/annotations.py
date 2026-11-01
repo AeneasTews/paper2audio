@@ -7,11 +7,15 @@ follow the paper when it's moved or renamed and the PDF itself is never modified
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
 
 TYPES = {"highlight", "underline", "note"}
+DEFAULT_COLOR = "#ffd400"
+# Colors are put into the reader's HTML, so only plain hex colors are accepted.
+COLOR = re.compile(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})")
 MAX_ANNOTATIONS = 5000
 
 
@@ -64,7 +68,7 @@ def validate(annotations) -> list[dict]:
             clean = {
                 "id": str(a["id"])[:64],
                 "type": a["type"],
-                "color": str(a.get("color", "#ffd400"))[:16],
+                "color": color if COLOR.fullmatch(color := str(a.get("color", DEFAULT_COLOR))) else DEFAULT_COLOR,
                 "page": int(a["page"]),
                 "text": str(a.get("text", ""))[:20000],
                 "comment": str(a.get("comment", ""))[:20000],

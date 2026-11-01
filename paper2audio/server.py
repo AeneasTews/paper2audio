@@ -32,13 +32,18 @@ def ollama_server(progress: Progress = print_progress):
         _wait_until_running(process)
         yield
     finally:
-        progress("Stopping ollama server...", None)
+        # Stop the server before reporting it: the progress callback may raise (the GUI
+        # cancels that way), and the server must be stopped regardless.
         process.terminate()
         try:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+        try:
+            progress("Stopped ollama server", None)
+        except Exception:
+            pass
 
 
 def _wait_until_running(process: subprocess.Popen) -> None:

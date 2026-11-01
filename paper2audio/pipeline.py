@@ -46,7 +46,10 @@ def convert(input_path: Path, output_path: Path, settings: config.Settings,
     audio.save(result, output_path)
     minutes = audio.duration_minutes(result)
     whole_minutes, seconds = divmod(round(minutes * 60), 60)
-    progress(f"Wrote {output_path} ({whole_minutes}:{seconds:02d})", 1.0)
+    try:
+        progress(f"Wrote {output_path} ({whole_minutes}:{seconds:02d})", 1.0)
+    except Exception:  # e.g. cancelled at the very last moment: the file is written, so it's done
+        pass
     return minutes
 
 
