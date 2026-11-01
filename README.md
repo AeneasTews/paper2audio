@@ -2,7 +2,7 @@
 
 Turn scientific papers into audio files, so you can listen to them while cycling, walking or commuting instead of reading them on a screen.
 
-paper2audio extracts the text from a PDF, plain text or Markdown file, cleans it up so it sounds natural when spoken, and reads it aloud with [ollama](https://ollama.com)'s **phonon** speech model. Figures in PDFs are described by a local vision model and read along with the text. Everything runs locally.
+paper2audio reads a PDF, plain text or Markdown file and turns it into speech with [ollama](https://ollama.com)'s **phonon** model. For PDFs, a local language model (Gemma 4 by default) looks at each page and writes out what should be spoken: formulas in words, figures and tables described, headers, page numbers and citations left out. You choose which parts of the paper you want to hear. Everything runs locally.
 
 ```sh
 paper2audio convert --input=paper.pdf --output=paper.mp3
@@ -11,96 +11,122 @@ paper2audio convert --input=paper.pdf --output=paper.mp3
 ## Requirements
 
 - macOS or Linux
-- Python 3.10+
-- [ollama](https://ollama.com) with the `phonon` model and a vision model for figures (default `gemma3`), and [uv](https://docs.astral.sh/uv/). `setup.sh` installs these if they're missing.
+- Python 3.11+
+- [ollama](https://ollama.com) with the `phonon` model and a language model, and [uv](https://docs.astral.sh/uv/). `setup.sh` installs these if they're missing.
 
 ## Installation
 
 From the project folder:
 
 ```sh
-./setup.sh
+./setup.sh            # asks which language model to download
+./setup.sh gemma4:12b # or name one directly ("none" for no language model)
 ```
 
 The script is safe to re-run; anything already set up is skipped. It:
 
 1. installs ollama with the [official installer](https://ollama.com/download) if the `ollama` command isn't found
 2. starts the ollama server if it isn't running
-3. downloads the `phonon` model and the `gemma3` vision model if they aren't there yet
-4. installs uv with its official installer if it's missing
-5. installs the `paper2audio` command (`uv tool install --editable .`), so changes to the code take effect immediately
+3. installs uv with its official installer if it's missing
+4. installs the `paper2audio` command (`uv tool install --editable .`), so changes to the code take effect immediately
+5. downloads the `phonon` speech model and the language model
 
-If you already have everything, `uv tool install -e .` on its own is enough.
+### Choosing a language model
 
-Alternatively, run it without installing via `uv run paper2audio ...` from the project folder.
+The model that fits your machine's memory is recommended (on Macs that's RAM, on Linux the GPU's memory if there is an NVIDIA card). You can pick a smaller one to save download size:
+
+| Model | Memory | Download | Notes |
+| --- | --- | --- | --- |
+| `gemma4:26b` | 32 GB | 16 GB | Recommended where it fits: reliable and fast for its size |
+| `gemma4:12b` | 16 GB | 7.7 GB | Good quality; occasionally stops early on a page and is retried automatically |
+| `gemma4:e4b` | 8 GB | 6.6 GB (9.5 GB on Macs) | Smaller download |
+| `gemma3:4b` | 8 GB | 3.4 GB | Smallest model that can read images; older |
+| `none` | – | – | Rule-based cleanup only: formulas and figures aren't handled |
+
+Any other ollama model works too, with `--llm-model` or in the config file. Models that can't read images get only the extracted text, so they can't describe figures.
 
 ## Usage
 
 ```sh
-# MP3 (small files, good for phones)
+# MP3 (small files, good for phones) or WAV
 paper2audio convert --input=paper.pdf --output=paper.mp3
-
-# WAV (uncompressed)
 paper2audio convert --input=paper.pdf --output=paper.wav
 
 # Plain text and Markdown work too
 paper2audio convert --input=notes.txt --output=notes.mp3
 paper2audio convert --input=article.md --output=article.mp3
 
-# Pick a different phonon voice (default: Zoey)
-paper2audio convert --input=paper.pdf --output=paper.mp3 --voice=<name>
+# Choose what to hear
+paper2audio convert --input=paper.pdf --output=paper.mp3 --include=summary,authors --exclude=figures
 
-# Describe figures with a different ollama vision model, or skip them
-paper2audio convert --input=paper.pdf --output=paper.mp3 --vision-model=qwen2.5vl
-paper2audio convert --input=paper.pdf --output=paper.mp3 --no-images
+# Another language model, or none
+paper2audio convert --input=paper.pdf --output=paper.mp3 --llm-model=gemma4:12b
+paper2audio convert --input=paper.pdf --output=paper.mp3 --no-llm
 ```
 
-| Option     | Description                                   |
-| ---------- | --------------------------------------------- |
-| `--input`  | File to read: `.pdf`, `.txt` or `.md` (required) |
+| Option | Description |
+| --- | --- |
+| `--input` | File to read: `.pdf`, `.txt` or `.md` (required) |
 | `--output` | Audio file to write, `.mp3` or `.wav` (required) |
-| `--voice`  | phonon voice to use (default: `Zoey`)         |
-| `--vision-model` | ollama vision model that describes figures in PDFs (default: `gemma3`) |
-| `--no-images` | Don't describe figures, read only the text |
+| `--voice` | phonon voice (default: `Zoey`) |
+| `--llm-model` | ollama model that reads the pages (default: the one recommended for this machine, if installed) |
+| `--no-llm` | Don't use a language model, only the rule-based cleanup |
+| `--include` | Comma-separated sections to read in addition to the defaults |
+| `--exclude` | Comma-separated sections to leave out |
 
-Progress is printed while the paper is spoken:
+### Sections
 
+| Section | Default | What it is |
+| --- | --- | --- |
+| `title` | on | The paper's title |
+| `authors` | off | Authors and affiliations |
+| `abstract` | on | The abstract |
+| `figures` | on | Spoken descriptions of figures and tables |
+| `formulas` | on | Formulas, spoken in words |
+| `footnotes` | on | Footnotes |
+| `citations` | off | In-text citations like [12] or (Smith et al., 2020) |
+| `acknowledgements` | off | The acknowledgements |
+| `references` | off | The reference list |
+| `appendix` | off | Everything after the reference list |
+| `summary` | off | A short generated summary, read before the paper |
+
+`figures`, `formulas`, `footnotes`, `appendix` and `summary` need a language model. Without one, the rule-based cleanup handles the others with simple heuristics.
+
+### Config file
+
+Defaults for every run go in `~/.config/paper2audio/config.toml` (or `$XDG_CONFIG_HOME/paper2audio/config.toml`). Command-line options override it.
+
+```toml
+voice = "Zoey"
+llm_model = "gemma4:12b"   # or "none"
+
+[sections]
+authors = true
+summary = true
+citations = false
 ```
-Extracting text from paper.pdf...
-Extracting images from paper.pdf...
-Describing image 1/4...
-...
-Speaking chunk 1/8...
-...
-Speaking chunk 8/8...
-Wrote paper.mp3 (33.4 min)
-```
 
-As a rough guide, a 15-page paper becomes about 30 minutes of audio and takes around a minute to generate, plus a few seconds per figure for the descriptions.
+### Speed
+
+With `gemma4:26b` or `gemma4:12b` on an M-series Mac, each page takes roughly 10 to 30 seconds, so a 10-page paper takes a few minutes before speaking starts. Speaking is fast: about 30 minutes of audio takes around a minute. Without a language model, the whole conversion takes about a minute.
 
 ## How it works
 
-1. **Extract** (`paper2audio/extract.py`): reads the text and embedded images of each PDF page with [pypdf](https://pypdf.readthedocs.io). Images smaller than 100 pixels (icons) and repeats of an image from an earlier page (logos) are skipped. Text and Markdown files are read directly.
-2. **Clean** (`paper2audio/clean.py`): makes the text suitable for listening:
-   - removes headers and footers that repeat on most pages (PDF)
-   - drops everything from the *References* / *Bibliography* heading onward
-   - strips citation markers like `[13]`, URLs, email addresses and footnote symbols (`∗ † ‡`)
+1. **Server** (`server.py`): if no ollama server is running, starts `ollama serve` for the duration of the run and shuts it down afterwards, also on Ctrl+C. An already-running server (e.g. the Ollama desktop app) is used and left alone.
+2. **Model** (`hardware.py`, `llm.py`): picks the language model, from the command line, the config file, or memory size. If none is installed, the rule-based cleanup is used.
+3. **Transcribe** (`transcribe.py`, PDFs with a language model): renders each page as an image (`extract.py`, with [pypdfium2](https://github.com/pypdfium2-team/pypdfium2)) and sends it to the model with the page's text extracted by [pypdf](https://pypdf.readthedocs.io). The prompt is built from the chosen sections. The end of the previous page is passed along, so sentences across page breaks stay whole. If a page's output looks incomplete, it's retried once. Pages after the references are skipped unless the references or appendix are wanted. The optional summary is written from the full transcript.
+4. **Clean** (`clean.py`): the rule-based cleanup for text, Markdown and PDFs without a language model:
+   - removes repeated headers and footers, citation markers, URLs, emails and footnote symbols
+   - drops the references, acknowledgements and front matter as configured
    - removes lines without any letters (page numbers, `_____` separators)
-   - rejoins words hyphenated across line breaks and glues lines back into paragraphs (PDF)
-   - unwraps hard-wrapped paragraphs (text and Markdown; blank lines separate paragraphs)
-   - strips Markdown syntax (headings, emphasis, links, images, HTML, front matter) and skips code blocks; list items and table rows are read one at a time
-   - places each figure description after the page the figure is on, at the next paragraph break so no sentence is cut in half (PDF)
-3. **Server** (`paper2audio/server.py`): if no ollama server is running, starts `ollama serve` for the duration of the run and shuts it down afterwards, also on Ctrl+C. An already-running server (e.g. the Ollama desktop app) is used and left alone.
-4. **Describe** (`paper2audio/describe.py`): sends each remaining figure to the vision model through ollama's API and asks for a short spoken-style description, read as "Figure description: ...". Figures after the references (appendix) aren't described, and the model can skip logos and decorations. The vision model is unloaded afterwards to free memory for phonon.
-5. **Speak** (`paper2audio/tts.py`): sends the text to `ollama run phonon` in chunks of about 4,000 characters and stitches the audio together. If phonon rejects a chunk, that chunk is skipped instead of failing the whole run.
-6. **Save** (`paper2audio/audio.py`): writes WAV, or encodes MP3 at 64 kbps with [lameenc](https://github.com/chrisstaite/lameenc). ffmpeg is not needed.
+   - rejoins hyphenated words and glues lines back into paragraphs
+   - strips Markdown syntax and skips code blocks; list items and table rows are read one at a time
+5. **Speak** (`tts.py`): sends the text to `ollama run phonon` in chunks of about 4,000 characters and stitches the audio together. If phonon rejects a chunk, that chunk is skipped instead of failing the whole run.
+6. **Save** (`audio.py`): writes WAV, or encodes MP3 at 64 kbps with [lameenc](https://github.com/chrisstaite/lameenc). ffmpeg is not needed.
 
 ## Known limitations
 
-- Only PDFs with a text layer work. Scanned papers would need OCR first.
-- Some content is still read aloud: author lists and affiliations on the title page, table rows, figure captions and acknowledgements.
-- Math comes out of the PDF garbled and is read as-is.
-- Only figures embedded as raster images (photos, screenshots, PNG/JPEG plots) are described. Figures drawn as vector graphics, as many plotting tools produce, aren't images in the PDF and are not picked up.
-- Figure descriptions come from a small local model: they can miss details or misread values, so treat them as a summary rather than a transcription.
-- Cleanup uses simple layout heuristics, so unusual layouts (e.g. some two-column papers) may need tweaks to `clean.py`.
-- phonon fails a whole input with `Error: input has no text to speak` if any paragraph contains nothing pronounceable, such as a line of underscores or `* * *`. The cleanup step removes these, but keep it in mind when piping text to phonon directly.
+- Language models can make mistakes: figure descriptions may miss or misread details, and a formula can occasionally be read wrongly. Smaller models make more mistakes.
+- Without a language model, math comes out of the PDF garbled, figures aren't described, and front matter is detected by simple heuristics.
+- Scanned PDFs (no text layer) are untested. A language model that can read images may handle them; the rule-based cleanup can't.
+- phonon fails a whole input with `Error: input has no text to speak` if any paragraph contains nothing pronounceable, such as a line of underscores or `* * *`. The cleanup removes these, but keep it in mind when piping text to phonon directly.
