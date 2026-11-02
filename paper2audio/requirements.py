@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config, hardware, llm, server, tts
+from . import config, hardware, llm, ocr, server, tts
 
 SETUP_SCRIPT = Path(__file__).resolve().parent.parent / "setup.sh"
 # Where installers put ollama; an app started from Finder or a launcher may not have
@@ -19,6 +19,7 @@ DOWNLOAD_SIZES = {
     "gemma4:12b": "7.7 GB",
     "gemma4:e4b": "9.5 GB" if sys.platform == "darwin" else "6.6 GB",
     "gemma3:4b": "3.4 GB",
+    ocr.MODEL: "2.7 GB",
 }
 
 
@@ -64,13 +65,14 @@ def check() -> list[Requirement]:
     """Check ollama and the models. Starts a temporary ollama server if needed."""
     has_ollama = shutil.which("ollama") is not None
     language_model, acceptable = wanted_language_model()
-    has_phonon = has_language_model = False
+    has_phonon = has_language_model = has_ocr = False
     if has_ollama:
         try:
             with server.ollama_server(lambda message, fraction: None):
                 installed = llm.installed_models()
                 has_phonon = tts.MODEL in installed
                 has_language_model = any(m in installed for m in acceptable)
+                has_ocr = ocr.MODEL in installed
         except (RuntimeError, OSError):
             pass  # an ollama that doesn't start counts as not set up; setup.sh will say why
     requirements = [
@@ -82,6 +84,11 @@ def check() -> list[Requirement]:
             language_model, f"{language_model} language model",
             "Reads the pages: formulas, figures and tables (optional)", has_language_model, False,
             size=DOWNLOAD_SIZES.get(language_model, ""),
+        ))
+        requirements.append(Requirement(
+            ocr.MODEL, "GLM-OCR text recognition",
+            "Transcribes PDF pages exactly, with the language model (optional)", has_ocr, False,
+            size=DOWNLOAD_SIZES[ocr.MODEL],
         ))
     return requirements
 

@@ -18,7 +18,8 @@ from . import clean, llm
 from .progress import Progress, print_progress
 
 KINDS = ("title", "authors", "keywords", "metadata", "abstract", "heading", "body", "caption", "table",
-         "equation", "footnote", "references", "acknowledgements", "declarations")
+         "figure", "equation", "footnote", "references", "acknowledgements", "declarations")
+# "figure" is a finished spoken description of a figure (from ocr.py), read as it is.
 CITE_START, CITE_END = "", ""
 NOTE_MARK = ""  # a footnote marker in the text, always dropped
 CITATION = re.compile(f"{CITE_START}(.*?){CITE_END}", re.DOTALL)
@@ -37,7 +38,9 @@ MAX_MATH_LENGTH = 600
 MATH_PROMPT = """\
 Convert each LaTeX snippet from a scientific paper into how it would be read aloud in \
 plain spoken English, e.g. "\\frac{QK^T}{\\sqrt{d_k}}" -> "Q K transpose divided by the \
-square root of d k", "x_i^2" -> "x i squared". Say subscripts right after their base \
+square root of d k", "x_i^2" -> "x i squared". Use the usual spoken conventions of \
+mathematics: font commands just give the letter ("\\mathcal{O}_K" -> "O K", "\\mathbb{R}" -> "R"), \
+"[K : \\mathbf{Q}]" -> "the degree of K over Q", "\\ldots" -> "and so on". Say subscripts right after their base \
 without "sub" ("d_{model}" -> "d model"), unless that would be ambiguous.
 
 Each snippet is shown in its sentence, marked with ⟦ ⟧. Answer with the spoken form of \
@@ -47,12 +50,17 @@ subset of K", not "F is a subset of K". Keep numbers as digits ("10000" stays \
 "10000"); they are read aloud correctly later. Answer with the spoken text only."""
 TABLE_PROMPT = """\
 Describe this table from a scientific paper for a listener who can't see it, in 2 to 5 \
-spoken sentences: what it compares, its rows and columns, and the main takeaway. Say \
-math in words. Plain text only, no Markdown.
+spoken sentences: what it compares, its rows and columns, and notable values. Only state \
+a conclusion if the caption or the paper's text below states it; don't draw your own. \
+Say math in words. Plain text only, no Markdown.
 
 Caption: {caption}
 
+What the paper says about the table: {context}
+
 {table}"""
+# How much of the paragraphs mentioning a table is given along with it
+TABLE_CONTEXT_CHARS = 1500
 
 
 @dataclass
@@ -70,6 +78,8 @@ def to_speech(blocks: list[Block], sections: Collection[str], model: str | None,
     for i, block in enumerate(blocks):
         text = block.text.replace(NOTE_MARK, "")
         text = CITATION.sub(r"\1" if "citations" in sections else "", text)
+        if "citations" not in sections:
+            text = clean.remove_citations(text)  # plain ones like [12], e.g. in OCR text
         text = clean.EMAIL.sub("", clean.URL.sub("", text))
         if not text.strip():
             continue  # e.g. a footnote that only held a marker or a link
@@ -79,7 +89,10 @@ def to_speech(blocks: list[Block], sections: Collection[str], model: str | None,
             # Readers put a table's caption right next to it.
             caption = next((blocks[j].text for j in (i + 1, i - 1)
                             if 0 <= j < len(blocks) and blocks[j].kind == "caption"), "")
-            text = "Table description: " + " ".join(llm.generate(model, TABLE_PROMPT.format(caption=caption, table=text)).split())
+            context = _mentions(blocks, caption)
+            progress("Describing a table...", None)
+            prompt = TABLE_PROMPT.format(caption=caption, context=context or "(nothing found)", table=text)
+            text = "Table description: " + _no_notation(llm.generate(model, prompt))
         elif block.kind == "equation":
             text = f"${text}$"
         elif block.kind == "footnote":
@@ -98,7 +111,7 @@ def _wanted(block: Block, sections: Collection[str]) -> bool:
         return False
     if block.kind in ("heading", "body"):
         return True
-    if block.kind in ("caption", "table"):
+    if block.kind in ("caption", "table", "figure"):
         return "figures" in sections
     if block.kind == "equation":
         return "formulas" in sections
@@ -130,7 +143,7 @@ def speak_math(snippets: list[tuple[str, str]], model: str | None,
         progress(f"Converting formulas {start + 1}-{start + len(batch)} of {len(hard)}...", start / len(hard))
         answers = llm.generate_keyed(model, MATH_PROMPT, [contexts[s] for s in batch], field="spoken")
         for snippet, answer in zip(batch, answers):
-            spoken[snippet] = answer.strip() if answer else _latex_to_text(snippet)
+            spoken[snippet] = _no_notation(answer) if answer else _latex_to_text(snippet)
     return spoken
 
 
@@ -139,6 +152,26 @@ def _context(paragraph: str, match: re.Match, chars: int = CONTEXT_CHARS) -> str
     before = paragraph[max(0, match.start() - chars):match.start()]
     after = paragraph[match.end():match.end() + chars]
     return f"…{before}⟦{match.group(1).strip()}⟧{after}…"
+
+
+def _mentions(blocks: list[Block], caption: str) -> str:
+    """The paragraphs that mention the table named in the caption ("Table 5: ..."), for context."""
+    match = re.match(r"\W*Table\s*(\d+)", caption)
+    if not match:
+        return ""
+    mention = re.compile(rf"\bTables?\s*{match.group(1)}\b")
+    text = " ".join(b.text for b in blocks if b.kind == "body" and mention.search(b.text))
+    return text[:TABLE_CONTEXT_CHARS]
+
+
+def _no_notation(spoken: str) -> str:
+    """A safety net for the model's answer: notation it left in ("Z^{n+m}") as words."""
+    if not re.search(r"[\\^_{}]", spoken):
+        return spoken.strip()
+    text = _latex_to_text(spoken)
+    text = re.sub(r"\^\s*\(([^()]*)\)", r" to the power of \1", text)  # x^(2 pi i)
+    text = re.sub(r"\^\s*(\S+)", r" to the power of \1", text)  # x^2, Z^n+m
+    return " ".join(re.sub(r"[_{}\\]", " ", text).split())
 
 
 def _latex_to_text(latex: str) -> str:

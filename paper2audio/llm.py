@@ -12,20 +12,20 @@ from .server import server_url
 TIMEOUT = 600  # seconds
 
 
-def generate(model: str, prompt: str, images: list[bytes] = (), num_ctx: int = 16384) -> str:
+def generate(model: str, prompt: str, images: list[bytes] = (), num_ctx: int = 16384, temperature: float = 0.2) -> str:
     payload = {
         "model": model,
         "prompt": prompt,
         "images": [base64.b64encode(image).decode() for image in images],
         "stream": False,
-        "options": {"temperature": 0.2, "num_ctx": num_ctx},
+        "options": {"temperature": temperature, "num_ctx": num_ctx},
     }
     if "thinking" in capabilities(model):
         payload["think"] = False  # much faster, and not needed for transcribing
     return _post("/api/generate", payload).get("response", "").strip()
 
 
-def generate_keyed(model: str, prompt: str, items: list[str], field: str) -> list[str | None]:
+def generate_keyed(model: str, prompt: str, items: list[str], field: str, images: list[bytes] = ()) -> list[str | None]:
     """Ask for one string per item, answered as JSON keyed by item number.
 
     Keys (rather than a plain list) mean a skipped item can't shift the answers for the
@@ -45,6 +45,7 @@ def generate_keyed(model: str, prompt: str, items: list[str], field: str) -> lis
         "model": model,
         "prompt": f'{prompt}\n\nAnswer with JSON: {{"answers": [{{"item": <number>, "{field}": ...}}, ...]}}, '
                   f"one entry for each of the {len(items)} items.\n\n{numbered}",
+        "images": [base64.b64encode(image).decode() for image in images],
         "stream": False,
         "format": schema,
         "options": {"temperature": 0, "num_ctx": 16384},

@@ -1,11 +1,14 @@
 """Ask ollama which models and voices are available, e.g. to offer them in the GUI."""
 
-from . import llm, tts
+from . import llm, ocr, tts
 
 
 def language_models() -> list[str]:
-    """Installed models that can generate text and could read the pages, e.g. 'gemma4:12b'."""
-    names = [n for n in llm.model_names() if n.split(":")[0] != tts.MODEL]
+    """Installed models that can generate text and could read the pages, e.g. 'gemma4:12b'.
+
+    Leaves out phonon and GLM-OCR: they're used alongside the language model, not as one.
+    """
+    names = [n for n in llm.model_names() if n.split(":")[0] not in (tts.MODEL, ocr.MODEL)]
     return [n for n in names if "completion" in _capabilities(n)]
 
 

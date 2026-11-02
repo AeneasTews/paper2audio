@@ -24,6 +24,8 @@ def main() -> None:
                               "a DOI or an arXiv ID like arxiv:1706.03762")
     convert.add_argument("--output", required=True, type=Path, help=f"audio file to write ({formats})")
     convert.add_argument("--speed", type=float, help="playback speed, e.g. 1.5 (default: 1)")
+    convert.add_argument("--no-disclaimer", action="store_true",
+                         help="don't start the audio with the note that it's machine-generated")
     convert.add_argument("--voice", help="phonon voice (default: Zoey)")
     convert.add_argument("--llm-model", help="ollama model that reads the pages (default: picked for this machine)")
     convert.add_argument("--no-llm", action="store_true", help="don't use a language model, only the rule-based cleanup")
@@ -55,6 +57,7 @@ def _convert(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     settings.voice = args.voice or settings.voice
     settings.llm_model = "none" if args.no_llm else args.llm_model or settings.llm_model
     settings.speed = args.speed or settings.speed
+    settings.disclaimer = settings.disclaimer and not args.no_disclaimer
     _check_speed(settings.speed, parser)
 
     # Turn kill / closed-terminal signals into a normal exit, so a temporary ollama

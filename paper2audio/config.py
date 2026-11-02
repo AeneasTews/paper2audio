@@ -5,6 +5,7 @@ The config file lives at $XDG_CONFIG_HOME/paper2audio/config.toml (usually
 
     voice = "Zoey"
     speed = 1.5                # playback speed
+    disclaimer = false         # no spoken note at the start that the audio is machine-generated
     llm_model = "gemma4:12b"   # or "none" to always use the rule-based cleanup
 
     [sections]
@@ -42,6 +43,7 @@ LLM_ONLY_SECTIONS = {"figures", "formulas", "footnotes", "appendix", "summary"}
 class Settings:
     voice: str = "Zoey"
     speed: float = 1.0
+    disclaimer: bool = True  # start the audio with a note that it's machine-generated
     llm_model: str | None = None  # None: pick automatically; "none": don't use a language model
     sections: set[str] = field(default_factory=lambda: {name for name, (on, _) in SECTIONS.items() if on})
 
@@ -61,13 +63,16 @@ def load(path: Path | None = None) -> Settings:
         data = tomllib.loads(path.read_text())
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"{path}: {e}") from None
-    unknown = set(data) - {"voice", "speed", "llm_model", "sections"}
+    unknown = set(data) - {"voice", "speed", "disclaimer", "llm_model", "sections"}
     if unknown:
         raise ValueError(f"{path}: unknown setting(s): {', '.join(sorted(unknown))}")
     settings.voice = data.get("voice", settings.voice)
     settings.speed = data.get("speed", settings.speed)
     if isinstance(settings.speed, bool) or not isinstance(settings.speed, int | float):
         raise ValueError(f"{path}: speed must be a number, e.g. 1.5")
+    settings.disclaimer = data.get("disclaimer", settings.disclaimer)
+    if not isinstance(settings.disclaimer, bool):
+        raise ValueError(f"{path}: disclaimer must be true or false")
     settings.llm_model = data.get("llm_model", settings.llm_model)
     for name, enabled in data.get("sections", {}).items():
         _check_section(name, path)

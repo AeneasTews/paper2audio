@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from . import audio, clean, config, document, extract, fetch, hardware, llm, readers, server, transcribe, tts
+from . import audio, clean, config, disclaimer, document, extract, fetch, hardware, llm, ocr, readers, server, transcribe, tts
 from .progress import Progress, print_progress
 
 # Structured formats, read into labeled blocks (see readers.py)
@@ -42,6 +42,8 @@ def convert(input_path: Path, output_path: Path, settings: config.Settings,
             hint = " (is it a scanned image?)" if input_path.suffix.lower() == ".pdf" else ""
             raise RuntimeError(f"no readable text found in {input_path}{hint}")
         result = tts.synthesize(text, settings.voice, progress)
+        if settings.disclaimer:
+            result = disclaimer.prepend(result, settings.voice, progress)
     result = audio.change_speed(result, settings.speed)
     audio.save(result, output_path)
     minutes = audio.duration_minutes(result)
@@ -71,7 +73,12 @@ def prepare_text(path: Path, settings: config.Settings, progress: Progress = pri
             progress(f"Reading {path}...", None)
             text = document.to_speech(STRUCTURED_READERS[suffix](path), sections, model, progress)
         elif suffix == ".pdf":
-            if model:
+            if model and ocr.is_available():
+                # GLM-OCR transcribes, the language model labels blocks and describes figures.
+                text = document.to_speech(ocr.read_pdf(path, model, sections, progress), sections, model, progress)
+            elif model:
+                progress(f"Note: {ocr.MODEL} isn't installed (run 'ollama pull {ocr.MODEL}' or setup.sh), "
+                         f"so {model} reads whole pages, which is less exact", None)
                 text = transcribe.transcribe_pdf(path, model, sections, progress)
             else:
                 progress(f"Extracting text from {path}...", None)
@@ -99,6 +106,9 @@ def choose_model(requested: str | None, progress: Progress = print_progress) -> 
     if requested:
         if requested not in installed:
             raise RuntimeError(f"model {requested!r} is not installed. Run 'ollama pull {requested}' or use --no-llm")
+        if requested.split(":")[0] == ocr.MODEL:
+            raise RuntimeError(f"{ocr.MODEL} transcribes pages alongside a language model; pick a language model "
+                               "like gemma4:12b")
         if "completion" not in llm.capabilities(requested):
             raise RuntimeError(f"model {requested!r} can't generate text, pick a language model")
         return requested

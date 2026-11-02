@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 from nicegui import ui
 
-from . import requirements, tts
+from . import ocr, requirements, tts
 from .requirements import Requirement
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -200,8 +200,11 @@ class SetupDialog:
 
     def _start(self) -> None:
         try:
-            # setup.sh always installs phonon; the language model only if it's still ticked.
-            language_model = next((m for m in self._to_install() if m != tts.MODEL), None)
+            # setup.sh always installs phonon; the language model (and with it GLM-OCR) only
+            # if it's still ticked. It skips whatever is already installed.
+            language_model = next((r.key for r in self._requirements
+                                   if r.key not in ("ollama", tts.MODEL, ocr.MODEL)
+                                   and (r.installed or self._selected.get(r.key, True))), None)
             self._process = requirements.start_setup(language_model)
         except (RuntimeError, OSError) as e:
             self._state = "failed"

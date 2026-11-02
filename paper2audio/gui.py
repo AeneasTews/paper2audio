@@ -446,6 +446,16 @@ class PaperApp:
                         self.model_select = NativeSelect(self._model_options(), self._default_model_value(),
                                                          on_change=self._update_state)
                     self.hint = ui.label("").classes("p2a-hint")
+                    with ui.element("label").classes("p2a-check p2a-section-option"):
+                        self.disclaimer_box = ui.element("input").props("type=checkbox")
+                        self.disclaimer_box.props["checked"] = self.defaults.disclaimer
+                        self.disclaimer = self.defaults.disclaimer
+                        self.disclaimer_box.on("change", lambda e: setattr(self, "disclaimer", bool(e.args)),
+                                               js_handler="(e) => emit(e.target.checked)")
+                        with ui.element("span"):
+                            ui.label("Disclaimer").classes("p2a-section-name")
+                            ui.label("Start with a short spoken note that the audio is machine-generated "
+                                     "and can contain mistakes").classes("p2a-hint")
                     with _row("Save as"):
                         self.output_input = ui.element("input").props('type=text placeholder="paper.mp3"')
                         self.output_input.on("change", self._output_changed, js_handler="(e) => emit(e.target.value)")
@@ -641,6 +651,7 @@ class PaperApp:
             speed=float(self.speed_select.value),
             llm_model=self.model_select.value or None,
             sections=set(self.sections),
+            disclaimer=self.disclaimer,
         )
 
     async def _choose_output(self) -> None:
@@ -893,7 +904,7 @@ class PaperApp:
         _set_disabled(self.voice_select.element, locked)
         _set_disabled(self.speed_select.element, busy)
         _set_disabled(self.model_select.element, locked)
-        for box in self.section_boxes.values():
+        for box in [*self.section_boxes.values(), self.disclaimer_box]:
             _set_disabled(box, busy)
         # Converting while the options load or setup runs could race with the ollama server.
         _set_disabled(self.convert_button, not busy and (loading or self.setup.running))

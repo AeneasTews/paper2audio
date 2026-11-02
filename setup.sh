@@ -96,7 +96,8 @@ if [ "$INSTALL_COMMAND" = 1 ]; then
     fi
 fi
 
-# 5. The models: phonon for speech, and a language model that reads the pages.
+# 5. The models: phonon for speech, a language model that understands the pages, and
+#    GLM-OCR, which transcribes PDF pages exactly (used together with the language model).
 #    The language model is recommended by memory size; pass another one as an argument
 #    (any ollama model), or "none" to only use the rule-based cleanup.
 installed() { ollama list | awk 'NR > 1 { print $1 }' | grep -qx -e "$1" -e "$1:latest"; }
@@ -119,6 +120,7 @@ if [ -z "$LLM_MODEL" ] && [ -t 0 ]; then
     echo "  gemma4:e4b    8 GB, 6.6 GB download (9.5 GB on Macs)"
     echo "  gemma3:4b     8 GB, 3.4 GB download (older, smallest)"
     echo "  none         no language model: formulas and figures aren't handled"
+    echo "  (with a language model, GLM-OCR is also downloaded: 2.7 GB)"
     echo "  or any other ollama model, e.g. one you already have"
     printf "Model [%s]: " "${RECOMMENDED:-none}"
     read -r LLM_MODEL
@@ -128,6 +130,7 @@ LLM_MODEL=${LLM_MODEL:-${RECOMMENDED:-none}}
 pull phonon
 if [ "$LLM_MODEL" != none ]; then
     pull "$LLM_MODEL"
+    pull glm-ocr
     case " $(run_python -c 'from paper2audio.hardware import MODELS; print(*MODELS)') " in
         *" $LLM_MODEL "*) ;;  # picked automatically at runtime
         *) status "To use $LLM_MODEL, pass --llm-model=$LLM_MODEL or set llm_model in ~/.config/paper2audio/config.toml" ;;
