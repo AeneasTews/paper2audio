@@ -1,6 +1,19 @@
+<div align="center">
+
 # paper2audio
 
-Turn scientific papers into audio files, so you can listen to them while cycling, walking or commuting instead of reading them on a screen.
+**Listen to scientific papers while cycling, walking or commuting.**
+
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
+![macOS | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555?logo=apple&logoColor=white)
+![Runs locally with ollama](https://img.shields.io/badge/runs%20locally-ollama-000?logo=ollama&logoColor=white)
+![Gemma 4](https://img.shields.io/badge/language%20model-Gemma%204-4285F4?logo=google&logoColor=white)
+
+[Quick start](#quick-start) - [Desktop app](#desktop-app) - [Usage](#usage) - [How it works](#how-it-works)
+
+<img src="docs/screenshot.png" alt="The paper2audio desktop app: a paper open in a tab, its outline on the left and the audio settings and player on the right" width="900">
+
+</div>
 
 paper2audio reads a paper (a PDF, an arXiv ID, a DOI, HTML, JATS XML, EPUB, LaTeX, text or Markdown) and turns it into speech with [ollama](https://ollama.com)'s **phonon** model. A local language model (Gemma 4 by default) speaks formulas in words, describes figures and tables, and leaves out headers, page numbers and citations, while the paper's own text is read as it is. You choose which parts of the paper you want to hear. Everything runs locally.
 
