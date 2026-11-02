@@ -7,6 +7,7 @@ The config file lives at $XDG_CONFIG_HOME/paper2audio/config.toml (usually
     speed = 1.5                # playback speed
     disclaimer = false         # no spoken note at the start that the audio is machine-generated
     llm_model = "gemma4:12b"   # or "none" to always use the rule-based cleanup
+    zotero_dir = "~/Zotero"    # the desktop app's Zotero data directory (found automatically), or "none"
 
     [sections]
     authors = true
@@ -46,6 +47,7 @@ class Settings:
     disclaimer: bool = True  # start the audio with a note that it's machine-generated
     llm_model: str | None = None  # None: pick automatically; "none": don't use a language model
     sections: set[str] = field(default_factory=lambda: {name for name, (on, _) in SECTIONS.items() if on})
+    zotero_dir: str | None = None  # the GUI's Zotero library; None: find it, "none": don't show it
 
 
 def config_path() -> Path:
@@ -63,7 +65,7 @@ def load(path: Path | None = None) -> Settings:
         data = tomllib.loads(path.read_text())
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"{path}: {e}") from None
-    unknown = set(data) - {"voice", "speed", "disclaimer", "llm_model", "sections"}
+    unknown = set(data) - {"voice", "speed", "disclaimer", "llm_model", "sections", "zotero_dir"}
     if unknown:
         raise ValueError(f"{path}: unknown setting(s): {', '.join(sorted(unknown))}")
     settings.voice = data.get("voice", settings.voice)
@@ -74,6 +76,9 @@ def load(path: Path | None = None) -> Settings:
     if not isinstance(settings.disclaimer, bool):
         raise ValueError(f"{path}: disclaimer must be true or false")
     settings.llm_model = data.get("llm_model", settings.llm_model)
+    settings.zotero_dir = data.get("zotero_dir", settings.zotero_dir)
+    if settings.zotero_dir is not None and not isinstance(settings.zotero_dir, str):
+        raise ValueError(f"{path}: zotero_dir must be a folder, e.g. \"~/Zotero\", or \"none\"")
     for name, enabled in data.get("sections", {}).items():
         _check_section(name, path)
         if not isinstance(enabled, bool):
