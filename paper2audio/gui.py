@@ -39,7 +39,7 @@ try:
 except ImportError as e:  # GUI extras are optional; the CLI works without them
     sys.exit(f"The GUI needs extra packages ({e.name}). Install them with: uv tool install -e '.[gui]'")
 
-from . import annotations, audio, config, document, hardware, models, pipeline, requirements, server, tts, zotero
+from . import annotations, audio, config, document, hardware, models, pipeline, requirements, server, share, tts, zotero
 from . import library as library_store
 from .intro import Intro
 from .setup_dialog import SetupDialog
@@ -319,6 +319,10 @@ PLAYER_HTML = f"""
     <button class="p2a-btn p2a-play" data-action="audio-play" title="Play" disabled>{icon("play")}</button>
     <button class="p2a-btn p2a-skip" data-action="audio-forward" title="Forward 10 seconds" disabled>{icon("rotate-cw")}<span class="p2a-skip-label">10</span></button>
   </div>
+  <div class="p2a-player-share">
+    <button class="p2a-push" data-action="audio-phone" title="Download it on your phone over Wi-Fi, with a QR code" disabled>{icon("smartphone")} Send to phone</button>
+    <button class="p2a-push" data-action="audio-save" title="Save a copy of the audio file somewhere else" disabled>{icon("download")} Save a copy…</button>
+  </div>
 </div>
 """
 
@@ -469,6 +473,7 @@ class PaperApp:
         self.zotero_loader: threading.Thread | None = None
         self.fetcher: threading.Thread | None = None
         self.fetch_status = None  # the open-remote dialog's status label, while it's open
+        self.phone_status = None  # the send-to-phone dialog's status label, while it's open
         self.output_path: Path | None = None
         self.language_models: list[str] = []
         self.recommended_model: str | None = None
@@ -507,6 +512,8 @@ class PaperApp:
         ui.on("p2a_shortcuts", _show_shortcuts)
         ui.on("p2a_report", self._show_report)
         ui.on("p2a_reveal", self._reveal)
+        ui.on("p2a_audio_save", self._save_audio_copy)
+        ui.on("p2a_audio_phone", self._send_to_phone)
         ui.on("p2a_intro", self.intro.show)
         ui.on("p2a_notify", lambda e: ui.notify(e.args, type="warning"))
         ui.on("p2a_tab", lambda e: self._activate(e.args, from_reader=True))
@@ -1097,6 +1104,78 @@ class PaperApp:
             text += "\n\n<details><summary>Conversion log</summary>\n\n```\n" + "\n".join(self.log_lines[-40:]) + "\n```\n</details>"
         return text.replace(str(Path.home()), "~")
 
+    def _audio_for(self, token) -> tuple[Path, str] | None:
+        """The audio file for a player token, and the paper's title."""
+        path = _audio_files.get(str(token))
+        if path is None or not path.is_file():
+            ui.notify("The audio file isn't there anymore.", type="warning")
+            return None
+        tab = next((t for t in self.tabs.values() if t.audio == str(token)), None)
+        return path, tab.title if tab else path.stem
+
+    async def _save_audio_copy(self, event) -> None:
+        found = self._audio_for(event.args)
+        if found is None:
+            return
+        path, title = found
+        folder = Path.home() / "Downloads"
+        name = re.sub(r"[^\w\s.,()-]", "", title).strip()[:80] or path.stem
+        result = await app.native.main_window.create_file_dialog(
+            dialog_type=_save_dialog(), directory=str(folder if folder.is_dir() else Path.home()),
+            save_filename=name + path.suffix)
+        if not result:
+            return
+        target = Path(result if isinstance(result, str) else result[0])
+        try:
+            if target.resolve() != path.resolve():
+                shutil.copyfile(path, target)
+        except OSError as e:
+            ui.notify(f"Couldn't save the copy: {e}", type="negative", multi_line=True)
+            return
+        ui.notify(f"Saved “{target.name}”.")
+
+    def _send_to_phone(self, event) -> None:
+        found = self._audio_for(event.args)
+        if found is None:
+            return
+        path, title = found
+        name = (re.sub(r"[^\w\s.,()-]", "", title).strip()[:80] or path.stem) + path.suffix
+        try:
+            sharing = share.PhoneShare(path, name, lambda state: self.events.put(("phone", state)))
+        except OSError as e:
+            ui.notify(f"Can't send to a phone: {e}.", type="warning")
+            return
+        try:
+            import segno
+            qr = segno.make(sharing.url, error="m").svg_inline(scale=5, dark="#000", light="#fff", border=2)
+        except ImportError:  # optional: the link alone also works
+            qr = ""
+        size_mb = path.stat().st_size / 1e6
+        with ui.dialog() as dialog, ui.card().classes("p2a-dialog p2a-phone"):
+            ui.label("Send to your phone").classes("p2a-dialog-title")
+            with ui.element("div").classes("p2a-phone-body"):
+                if qr:
+                    ui.html(qr, sanitize=False).classes("p2a-qr")
+                with ui.element("div").classes("p2a-phone-text"):
+                    ui.label("Scan the code with your phone's camera and open the link. "
+                             "The phone has to be on the same Wi-Fi as this computer.")
+                    ui.label("It opens a page with a player and a Download button. iPhone: the download "
+                             "is then in the Files app, under Downloads. Android: in the Downloads folder.") \
+                        .classes("p2a-hint")
+                    ui.label(f"{name} · {size_mb:.1f} MB" if size_mb < 10 else f"{name} · {size_mb:.0f} MB").classes("p2a-hint")
+                    self.phone_status = ui.label("Waiting for your phone…").classes("p2a-phone-status")
+            ui.label(sharing.url).classes("p2a-hint p2a-phone-url")
+            ui.label("The file is shared on this network only while this window is open.").classes("p2a-hint")
+            with ui.element("div").classes("p2a-actions"):
+                ui.html("Done", tag="button", sanitize=False).classes("p2a-push p2a-primary").on("click", dialog.close)
+
+        def closed() -> None:
+            sharing.stop()
+            self.phone_status = None
+
+        dialog.on("hide", closed)
+        dialog.open()
+
     def _reveal(self, event) -> None:
         """Show the audio file the player has loaded (it may be another tab's, still playing)."""
         path = _audio_files.get(str(event.args))
@@ -1141,7 +1220,7 @@ class PaperApp:
         self.log.set_text("")
         self.worker = threading.Thread(
             target=self._run,
-            args=(tab.path, output_path, settings),
+            args=(tab.path, output_path, settings, self._tags(tab)),
             daemon=True,
         )
         self.worker.start()
@@ -1159,7 +1238,13 @@ class PaperApp:
             return f"The folder {output_path.parent} doesn't exist."
         return None
 
-    def _run(self, input_path: Path, output_path: Path, settings: config.Settings) -> None:
+    def _tags(self, tab: Tab) -> dict[str, str]:
+        """Title and authors for the audio file, so a phone's player shows the paper's name."""
+        authors = (self.catalog.get(tab.id) or self.library.papers.get(tab.id) or {}).get("authors") or []
+        artist = ", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "")
+        return {"title": tab.title, "artist": artist, "album": "paper2audio"}
+
+    def _run(self, input_path: Path, output_path: Path, settings: config.Settings, tags: dict[str, str]) -> None:
         """Runs in the worker thread; talks to the UI only through the event queue."""
 
         def progress(message: str, fraction: float | None) -> None:
@@ -1168,7 +1253,7 @@ class PaperApp:
             self.events.put(("progress", message, fraction))
 
         try:
-            minutes = pipeline.convert(input_path, output_path, settings, progress)
+            minutes = pipeline.convert(input_path, output_path, settings, progress, tags)
         except Cancelled:
             self.events.put(("cancelled",))
         except RuntimeError as e:
@@ -1214,6 +1299,12 @@ class PaperApp:
             if self.fetch_status:
                 self.fetch_dialog.close()
             self._open(*args)
+            return
+        if kind == "phone":
+            if self.phone_status:
+                state = args[0]
+                self.phone_status.set_text("Sent ✓ You can close this window." if state == "done"
+                                           else "Downloading…" if state == "started" else f"The server {state}.")
             return
         if kind == "zotero":
             self.zotero_snapshot, self.zotero_mtime, self.zotero_status = args

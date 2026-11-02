@@ -24,9 +24,11 @@ MIN_SPEED, MAX_SPEED = 0.5, 4.0
 FRAME_SAMPLES = 4096
 
 
-def save(audio: Audio, path: Path) -> None:
+def save(audio: Audio, path: Path, tags: dict[str, str] | None = None) -> None:
+    """Write the audio; tags (e.g. title, artist, album) are shown by music players."""
     codec, bit_rate = FORMATS[path.suffix.lower()]
     with av.open(str(path), "w") as container:
+        container.metadata.update({k: v for k, v in (tags or {}).items() if v})
         stream = container.add_stream(codec, rate=audio.sample_rate, layout=_layout(audio))
         if bit_rate:
             stream.bit_rate = bit_rate

@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["nicegui>=2.10", "pywebview>=5"]
+gui = ["nicegui>=2.10", "pywebview>=5", "segno>=1.6"]
 
 [project.scripts]
 paper2audio = "paper2audio.cli:main"

@@ -515,3 +515,13 @@ html.p2a-mode-library #p2a-toolbar, html.p2a-mode-library #p2a-main { display: n
 .p2a-intro-dots span.p2a-on { background: var(--p2a-accent); }
 .p2a-intro-body .p2a-hint { white-space: normal; }
 .p2a-intro-list li { list-style: disc; }
+.p2a-player-share { display: flex; gap: 6px; justify-content: center; padding-top: 4px; }
+.p2a-player-share .p2a-push { height: 24px; padding: 0 9px; font-size: 12px; }
+.p2a-player-share .p2a-push .p2a-icon { width: 13px; height: 13px; }
+.p2a-player .p2a-player-share .p2a-push:disabled { opacity: 1; }
+.p2a-dialog.p2a-phone { width: 520px; }
+.p2a-phone-body { display: flex; gap: 16px; align-items: flex-start; width: 100%; }
+.p2a-qr { flex: none; line-height: 0; border-radius: 8px; overflow: hidden; box-shadow: 0 0 0 1px var(--p2a-border); }
+.p2a-phone-text { display: flex; flex-direction: column; gap: 8px; }
+.p2a-phone-status { font-weight: 600; color: var(--p2a-accent); }
+.p2a-phone-url { word-break: break-all; -webkit-user-select: text; user-select: text; }

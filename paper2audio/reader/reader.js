@@ -828,6 +828,8 @@
     else if (action === "audio-back") audio.currentTime = Math.max(0, audio.currentTime - SKIP);
     else if (action === "audio-forward") audio.currentTime = Math.min(audio.duration || Infinity, audio.currentTime + SKIP);
     else if (action === "audio-reveal") emitArgs("p2a_reveal", audioUrl.split("/").pop());
+    else if (action === "audio-save") emitArgs("p2a_audio_save", audioUrl.split("/").pop());
+    else if (action === "audio-phone") emitArgs("p2a_audio_phone", audioUrl.split("/").pop());
     updatePlayer();
   }
 

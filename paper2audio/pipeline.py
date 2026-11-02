@@ -30,8 +30,11 @@ def resolve(source: str, progress: Progress = print_progress) -> Path:
 
 
 def convert(input_path: Path, output_path: Path, settings: config.Settings,
-            progress: Progress = print_progress) -> float:
+            progress: Progress = print_progress, tags: dict[str, str] | None = None) -> float:
     """Convert a paper to an audio file and return its length in minutes.
+
+    tags: title, artist etc. written into the file, so phones and music players show the
+    paper's name; by default the file name as the title.
 
     Raises RuntimeError if something goes wrong. Any exception raised by `progress`
     (e.g. to cancel) propagates, and a temporary ollama server is still shut down.
@@ -45,7 +48,7 @@ def convert(input_path: Path, output_path: Path, settings: config.Settings,
         if settings.disclaimer:
             result = disclaimer.prepend(result, settings.voice, progress)
     result = audio.change_speed(result, settings.speed)
-    audio.save(result, output_path)
+    audio.save(result, output_path, {"title": input_path.stem, "album": "paper2audio", **(tags or {})})
     minutes = audio.duration_minutes(result)
     whole_minutes, seconds = divmod(round(minutes * 60), 60)
     try:
