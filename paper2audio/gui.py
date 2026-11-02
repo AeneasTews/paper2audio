@@ -1,4 +1,5 @@
-"""Desktop GUI: a PDF reader with annotations next to the conversion settings, in a native window.
+"""Desktop GUI: a PDF reader with annotations next to the conversion settings, in a native window,
+with tabs for several papers and a library (with Zotero's papers merged in) as the first tab.
 
 Run with `paper2audio-gui [paper.pdf]`. Needs the optional GUI dependencies:
 `uv tool install -e '.[gui]'`.
@@ -6,7 +7,8 @@ Run with `paper2audio-gui [paper.pdf]`. Needs the optional GUI dependencies:
 Built with NiceGUI in native mode (pywebview), so the window is drawn by the system's web
 engine. The reader itself (paper2audio/reader/reader.js) runs in the web view; this module
 serves it page images rendered with pypdfium2, text positions for selecting text, the
-outline, and annotation storage, and runs the conversion.
+outline, and annotation storage, keeps the library (library.py, zotero.py), and runs the
+conversion.
 """
 
 import html
@@ -17,6 +19,7 @@ import queue
 import re
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -36,13 +39,15 @@ try:
 except ImportError as e:  # GUI extras are optional; the CLI works without them
     sys.exit(f"The GUI needs extra packages ({e.name}). Install them with: uv tool install -e '.[gui]'")
 
-from . import annotations, audio, config, document, hardware, models, pipeline, requirements, server, tts
+from . import annotations, audio, config, document, hardware, models, pipeline, requirements, server, tts, zotero
+from . import library as library_store
 from .setup_dialog import SetupDialog
 
 READER_DIR = Path(__file__).parent / "reader"
 MAX_RENDER_WIDTH = 8192  # pixels; enough for 400% zoom on a Retina screen
 SPEEDS = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
 NO_MODEL = "none"  # the rule-based cleanup, without a language model
+ZOTERO_CHECK_SECONDS = 10  # how often to look whether Zotero's database changed
 ISSUES_URL = "https://github.com/AeneasTews/paper2audio/issues/new"
 MAX_ISSUE_URL = 7500  # browsers and GitHub reject much longer URLs
 
@@ -240,9 +245,10 @@ def _button(action: str, icon_name: str, title: str, needs_pdf: bool = True, ext
 
 TOP_HTML = f"""
 <div id="p2a-tabs">
+  <div id="p2a-tablist"></div>
+  {_button("quick-open", "search", f"Find a paper… ({_MOD}K)", needs_pdf=False)}
   {_button("emit-open", "folder-open", f"Open a paper… ({_MOD}O)", needs_pdf=False)}
   {_button("emit-open_remote", "link", f"Open from arXiv, DOI or URL… ({_SHIFT_MOD}O)", needs_pdf=False)}
-  <div class="p2a-tab">{icon("file-text")}<span id="p2a-tab-title">No paper open</span></div>
 </div>
 <div id="p2a-toolbar">
   <div class="p2a-toolbar-group">
@@ -289,9 +295,53 @@ SIDEBAR_AND_VIEW_HTML = f"""
   <div class="p2a-sidebar-body" id="p2a-sidebar-body"></div>
 </div>
 <div id="p2a-view">
-  <div id="p2a-scroll"><div id="p2a-pages"></div></div>
   <div id="p2a-popup"></div>
 </div>
+"""
+
+# The audio player, in the Audio section. Greyed out until there's audio; reader.js runs it.
+PLAYER_HTML = f"""
+<div class="p2a-player p2a-disabled" id="p2a-player">
+  <audio id="p2a-audio" preload="metadata"></audio>
+  <div class="p2a-player-top">
+    <span class="p2a-player-name" id="p2a-player-name">No audio yet</span>
+    <button class="p2a-btn" data-action="audio-reveal" title="Show in folder" disabled>{icon("folder-open")}</button>
+  </div>
+  <div class="p2a-player-seek">
+    <span id="p2a-audio-time">0:00</span>
+    <input type="range" id="p2a-audio-seek" min="0" max="1000" step="1" value="0" disabled>
+    <span id="p2a-audio-duration">0:00</span>
+  </div>
+  <div class="p2a-player-controls">
+    <button class="p2a-btn p2a-skip" data-action="audio-back" title="Back 10 seconds" disabled>{icon("rotate-ccw")}<span class="p2a-skip-label">10</span></button>
+    <button class="p2a-btn p2a-play" data-action="audio-play" title="Play" disabled>{icon("play")}</button>
+    <button class="p2a-btn p2a-skip" data-action="audio-forward" title="Forward 10 seconds" disabled>{icon("rotate-cw")}<span class="p2a-skip-label">10</span></button>
+  </div>
+</div>
+"""
+
+# The Library tab: collections on the left, their papers in the middle, details on the right.
+LIBRARY_HTML = f"""
+<div id="p2a-library">
+  <div class="p2a-lib-toolbar">
+    {_button("lib-new-collection", "folder-plus", "New collection", needs_pdf=False)}
+    {_button("lib-add-files", "file-plus", "Add papers to the library…", needs_pdf=False)}
+    {_button("lib-sync", "refresh-cw", "Reload the Zotero library", needs_pdf=False)}
+    <div class="p2a-grow"></div>
+    <label class="p2a-search">{icon("search")}<input id="p2a-lib-search" type="text" placeholder="Filter by title, author, year"></label>
+  </div>
+  <div class="p2a-lib-main">
+    <div id="p2a-lib-tree"></div>
+    <div id="p2a-lib-items"></div>
+    <div id="p2a-lib-info"></div>
+  </div>
+</div>
+<div id="p2a-menu"></div>
+<div id="p2a-picker"><div class="p2a-picker-box">
+  <label class="p2a-search">{icon("search")}<input id="p2a-picker-input" type="text" placeholder="Find a paper by title, author, year or file name"></label>
+  <div id="p2a-picker-list"></div>
+  <div class="p2a-picker-hint"><kbd>↑</kbd><kbd>↓</kbd> choose <kbd>↩</kbd> open in a tab <kbd>esc</kbd> close</div>
+</div></div>
 """
 
 
@@ -370,6 +420,32 @@ class Cancelled(Exception):
     pass
 
 
+@dataclass
+class Tab:
+    """An open paper: what the right pane shows for it."""
+    id: str  # the paper's library ID
+    path: Path
+    source: str | None  # arXiv ID, DOI or URL it was downloaded from, if any
+    token: str = ""
+    title: str = ""
+    subtitle: str = ""
+    pages: str = "—"
+    output: str = ""  # where to save the audio
+    audio: str | None = None  # token of the finished audio, for the player
+    status: str = ""
+    progress: float = 0.0
+
+
+_library: library_store.Library | None = None
+
+
+def _get_library() -> library_store.Library:
+    global _library
+    if _library is None:
+        _library = library_store.Library()
+    return _library
+
+
 class PaperApp:
     """State and UI of the window. Background work talks to it through an event queue."""
 
@@ -378,8 +454,16 @@ class PaperApp:
         self.cancel = threading.Event()
         self.worker: threading.Thread | None = None
         self.options_loader: threading.Thread | None = None
-        self.input_path: Path | None = initial_file
-        self.input_source: str | None = None  # arXiv ID, DOI or URL the input was downloaded from
+        self.initial_file = initial_file
+        self.tabs: dict[str, Tab] = {}  # in the order of the tab strip
+        self.active: Tab | None = None  # None: the Library tab
+        self.converting: Tab | None = None
+        self.library = _get_library()
+        self.catalog: dict[str, dict] = {}  # papers the library view shows, by ID; only these can be opened from it
+        self.zotero_snapshot: zotero.Snapshot | None = None
+        self.zotero_mtime = 0.0
+        self.zotero_status = ""
+        self.zotero_loader: threading.Thread | None = None
         self.fetcher: threading.Thread | None = None
         self.fetch_status = None  # the open-remote dialog's status label, while it's open
         self.output_path: Path | None = None
@@ -408,6 +492,7 @@ class PaperApp:
             with ui.element("div").props("id=p2a-main"):
                 ui.html(SIDEBAR_AND_VIEW_HTML, sanitize=False).style("display: contents")
                 self._build_pane()
+            ui.html(LIBRARY_HTML, sanitize=False).style("display: contents")
         self.setup = SetupDialog(on_installed=self._refresh_options)
         ui.on("p2a_open", self._choose_input)
         ui.on("p2a_open_remote", self._show_open_remote)
@@ -416,13 +501,14 @@ class PaperApp:
         ui.on("p2a_close", self._close_window)
         ui.on("p2a_shortcuts", _show_shortcuts)
         ui.on("p2a_report", self._show_report)
+        ui.on("p2a_reveal", self._reveal)
         ui.on("p2a_notify", lambda e: ui.notify(e.args, type="warning"))
+        ui.on("p2a_tab", lambda e: self._activate(e.args, from_reader=True))
+        ui.on("p2a_tab_close", lambda e: self._close_tab(e.args))
+        ui.on("p2a_lib", self._library_action)
         ui.timer(0.1, self._poll_events)
-        if self.input_path:
-            ui.timer(0.2, lambda: self._set_input(self.input_path), once=True)  # after reader.js is ready
-        else:
-            ui.timer(0.2, lambda: ui.run_javascript(
-                "P2A.showMessage('file-text', 'Open a PDF, text or Markdown file to start.')"), once=True)
+        ui.timer(0.2, self._startup, once=True)  # after reader.js is ready
+        ui.timer(ZOTERO_CHECK_SECONDS, self._check_zotero)
         self._update_state()
         self._refresh_options()
         if config_problem:
@@ -468,6 +554,7 @@ class PaperApp:
                     with ui.element("div").classes("p2a-progress"):
                         self.progress_bar = ui.element("div").style("width: 0%")
                     self.status = ui.label("").classes("p2a-status")
+                    ui.html(PLAYER_HTML, sanitize=False).style("display: contents")
 
                 sections_section = Section("p2a-sec-sections", "Sections", "list-tree")
                 with sections_section.body:
@@ -488,11 +575,6 @@ class PaperApp:
                                                         else ""))\
                                     .classes("p2a-hint")
 
-                self.output_section = Section("p2a-sec-output", "Output", "file-text")
-                with self.output_section.body:
-                    self.player = ui.element("audio").props("controls preload=metadata")
-                    ui.html('<span class="p2a-link">Show in folder</span>', sanitize=False).on("click", self._reveal)
-                self.output_section.element.set_visibility(False)
 
                 log_section = Section("p2a-sec-log", "Log", "list-tree", collapsed=True)
                 with log_section.body:
@@ -514,62 +596,310 @@ class PaperApp:
 
     async def _choose_input(self) -> None:
         paths = await app.native.main_window.create_file_dialog(
-            allow_multiple=False,
+            allow_multiple=True,
             file_types=("Papers (" + ";".join(f"*{s}" for s in pipeline.SUPPORTED_INPUTS) + ")", "All files (*.*)"),
         )
-        if paths:
-            self._set_input(Path(paths[0]))
+        for i, path in enumerate(paths or []):
+            self._open(Path(path), activate=i == len(paths) - 1)
 
-    def _set_input(self, path: Path, source: str | None = None) -> None:
-        """Show a paper. source: the arXiv ID, DOI or URL it was downloaded from, if any."""
-        self.input_path = path
-        self.input_source = source
-        self.output_section.element.set_visibility(False)
-        self.info_source.set_text(source or "Local file")
-        self.info_file.set_text(path.name)
-        self.info_folder.set_text(str(path.parent))
-        token = secrets.token_urlsafe(8)
-        _documents.clear()  # one paper at a time
+    def _startup(self) -> None:
+        """Show the library, reopen the tabs of last time, and read Zotero's library."""
+        self._push_library()
+        session = self.library.session
+        for path in session["tabs"]:
+            if Path(path).is_file():
+                self._open(Path(path), activate=False, record=False)
+        if self.initial_file:
+            self._open(self.initial_file)
+        else:
+            active = library_store.paper_id(session["active"]) if session["active"] else None
+            self._activate(active if active in self.tabs else "library")
+        self._sync_zotero()
+
+    def _open(self, path: Path, source: str | None = None, activate: bool = True, record: bool = True) -> None:
+        """Open a paper in a new tab, or switch to its tab if it's open already.
+        source: the arXiv ID, DOI or URL it was downloaded from, if any."""
+        path = path.expanduser().resolve()
+        tab_id = library_store.paper_id(path)
+        if tab_id in self.tabs:
+            if activate:
+                self._activate(tab_id)
+            return
+        known = self.library.papers.get(tab_id) or {}
+        source = source or known.get("source")
+        if not path.is_file():
+            if source:  # a download that's no longer in the cache: download it again
+                self._start_fetch(source)
+            else:
+                ui.notify(f"“{path.name}” isn’t at {path.parent} anymore.", type="warning", multi_line=True)
+            return
+        tab = Tab(tab_id, path, source, token=secrets.token_urlsafe(8))
+        entry = self.catalog.get(tab_id) or {}
         suffix = path.suffix.lower()
-        title = path.stem
+        title, authors = path.stem, []
+        message = None
         try:
             if suffix == ".pdf":
                 document_ = Document(path, annotations.document_id(path))
-                with _pdfium_lock:
-                    pdf = pdfium.PdfDocument(path)
-                    try:
-                        sizes = [list(pdf[i].get_size()) for i in range(len(pdf))]
-                        meta_title = (pdf.get_metadata_dict().get("Title") or "").strip()
-                    finally:
-                        pdf.close()
-                _documents[token] = document_
-                title = meta_title if 3 <= len(meta_title) <= 200 else path.stem
-                self.subtitle_label.set_text(f"PDF · {len(sizes)} pages")
-                self.info_pages.set_text(str(len(sizes)))
-                ui.run_javascript(f"P2A.open({json.dumps({'token': token, 'title': title, 'pages': sizes})})")
+                sizes, meta_title, authors = _pdf_info(path)
+                _documents[tab.token] = document_
+                title = meta_title or path.stem
+                tab.subtitle, tab.pages = f"PDF · {len(sizes)} pages", str(len(sizes))
+                payload = {"kind": "pdf", "doc": {"token": tab.token, "pages": sizes}}
             elif suffix in pipeline.STRUCTURED_READERS:
-                _documents[token] = Document(path)
+                _documents[tab.token] = Document(path)
                 try:
                     blocks = _read_blocks(path, path.stat().st_mtime)
                     title = next((text for kind, text, _ in blocks if kind == "title"), path.stem)[:200]
                 except Exception:
                     pass  # the preview shows the error
-                kind = "arXiv HTML" if path.name.startswith("arxiv-") and suffix == ".html" else FORMAT_NAMES[suffix]
-                self.subtitle_label.set_text(kind)
-                self.info_pages.set_text("—")
-                ui.run_javascript(f"P2A.showBlocks({json.dumps(title)}, {json.dumps(f'/blocks/{token}')})")
+                tab.subtitle = "arXiv HTML" if path.name.startswith("arxiv-") and suffix == ".html" else FORMAT_NAMES[suffix]
+                payload = {"kind": "blocks", "url": f"/blocks/{tab.token}"}
             else:
-                _documents[token] = Document(path)
-                self.subtitle_label.set_text("Markdown" if suffix == ".md" else "Text")
-                self.info_pages.set_text("—")
-                ui.run_javascript(f"P2A.showText({json.dumps(path.name)}, {json.dumps(f'/textfile/{token}')})")
-            self.title_label.set_text(title)
+                _documents[tab.token] = Document(path)
+                tab.subtitle = "Markdown" if suffix == ".md" else "Text"
+                payload = {"kind": "text", "url": f"/textfile/{tab.token}"}
         except (OSError, pdfium.PdfiumError) as e:
-            self.title_label.set_text(path.name)
-            self.subtitle_label.set_text("Can't open this file")
-            ui.run_javascript(f"P2A.showMessage('file-text', {json.dumps(f'Can’t open {path.name}: {e}')})")
-        self._set_output(str(_default_output(path, title, downloaded=source is not None)))
+            tab.subtitle = "Can't open this file"
+            message = f"Can’t open {path.name}: {e}"
+            payload = {"kind": "message", "message": message}
+        if entry.get("zotero") is not None or known.get("title"):
+            # Zotero's metadata, or what was recorded from it earlier, is better than the PDF's
+            title = entry.get("title") or known["title"]
+        tab.title = title
+        tab.output = str(_default_output(path, title, downloaded=source is not None))
+        # Audio made earlier: the file recorded for this paper, or one at the default place.
+        for earlier in (known.get("audio"), tab.output):
+            if earlier and Path(earlier).is_file():
+                tab.audio = secrets.token_urlsafe(8)
+                _audio_files[tab.audio] = Path(earlier)
+                tab.output = earlier
+                break
+        self.tabs[tab_id] = tab
+        ui.run_javascript(f"P2A.openTab({json.dumps({'id': tab_id, 'title': title, 'activate': activate, **payload})})")
+        if record and message is None:
+            self.library.record(path, title, authors, source=source, opened=True)
+            self._save_library()
+        if activate:
+            self._activate(tab_id)
+        else:
+            self._save_session()
+
+    def _activate(self, tab_id: str, from_reader: bool = False) -> None:
+        """Show a tab ("library" for the Library). from_reader: the reader switched already."""
+        tab = self.tabs.get(tab_id)
+        self.active = tab
+        if not from_reader:
+            ui.run_javascript(f"P2A.activate({json.dumps(tab.id if tab else 'library')}, false)")
+        self._render_pane()
+        self._save_session()
+        if tab is None:
+            self._check_zotero()
+
+    def _close_tab(self, tab_id: str) -> None:
+        tab = self.tabs.pop(tab_id, None)
+        if tab is None:
+            return
+        _documents.pop(tab.token, None)
+        if tab.audio:
+            _audio_files.pop(tab.audio, None)
+        if self.active is tab:
+            self.active = None  # the reader activates another tab next
+        self._save_session()
+
+    def _save_session(self) -> None:
+        self.library.session = {"tabs": [str(t.path) for t in self.tabs.values()],
+                                "active": str(self.active.path) if self.active else None}
+        self._save_library(push=False)
+
+    def _save_library(self, push: bool = True) -> None:
+        try:
+            self.library.save()
+        except OSError as e:
+            ui.notify(f"Couldn't save the library: {e}", type="negative")
+        if push:
+            self._push_library()
+
+    def _render_pane(self) -> None:
+        """Show the active paper in the right pane."""
+        tab = self.active
+        if tab is not None:
+            self.title_label.set_text(tab.title)
+            self.subtitle_label.set_text(tab.subtitle)
+            self.info_source.set_text(tab.source or "Local file")
+            self.info_file.set_text(tab.path.name)
+            self.info_folder.set_text(str(tab.path.parent))
+            self.info_pages.set_text(tab.pages)
+            self._set_output(tab.output)
+            audio_file = _audio_files.get(tab.audio) if tab.audio else None
+            ui.run_javascript(f"P2A.setAudio({json.dumps(f'/audio/{tab.audio}' if audio_file else None)}, "
+                              f"{json.dumps(audio_file.name if audio_file else '')})")
+        self._render_status()
         self._update_state()
+
+    def _render_status(self) -> None:
+        """The conversion's progress; while another paper converts, that one's."""
+        converting = self.converting if self._busy() else None
+        if converting is not None and converting is not self.active:
+            self.status.set_text(f"Converting “{converting.title}”: {converting.status}")
+            self._set_progress(converting.progress)
+        elif self.active is not None:
+            self.status.set_text(self.active.status)
+            self._set_progress(self.active.progress)
+
+    # --- the library ---------------------------------------------------------------------
+
+    def _push_library(self) -> None:
+        """Send the library, merged with Zotero's, to the library view and the quick search."""
+        papers: dict[str, dict] = {}
+        for pid, paper in self.library.papers.items():
+            papers[pid] = {
+                "id": pid, "title": paper["title"], "authors": paper["authors"], "year": paper["year"],
+                "path": paper["path"], "added": paper["added"], "opened": paper["opened"],
+                "collections": paper["collections"], "zotero": None, "zcollections": [],
+            }
+        snapshot = self.zotero_snapshot
+        for item in snapshot.items if snapshot else []:
+            pid = library_store.paper_id(item.path)
+            entry = papers.setdefault(pid, {
+                "id": pid, "path": str(item.path), "added": None, "opened": None, "collections": [],
+            })
+            entry.update(title=item.title, authors=item.authors, year=item.year or entry.get("year", ""),
+                         zotero=item.library, zcollections=item.collections)
+        for entry in papers.values():
+            entry["missing"] = not Path(entry["path"]).is_file()
+        self.catalog = papers
+        data = {
+            "papers": list(papers.values()),
+            "collections": [{"id": cid, **c} for cid, c in self.library.collections.items()],
+            "zotero": None if snapshot is None and not self.zotero_status else {
+                "status": self.zotero_status,
+                "libraries": [{"id": lid, "name": name} for lid, name in snapshot.libraries] if snapshot else [],
+                "collections": [{"id": cid, "name": name, "parent": parent, "library": lid}
+                                for cid, name, parent, lid in snapshot.collections] if snapshot else [],
+            },
+            "home": str(Path.home()),
+        }
+        ui.run_javascript(f"P2A.setLibrary({json.dumps(data)})")
+
+    async def _library_action(self, event) -> None:
+        """Changes made in the library view. Papers are only referred to by ID, never by path."""
+        args = event.args if isinstance(event.args, dict) else {}
+        action = args.get("action")
+        ids = [i for i in args.get("ids") or [] if isinstance(i, str) and i in self.catalog]
+        collection = args.get("collection") if isinstance(args.get("collection"), str) else None
+        name = str(args.get("name") or "")
+        if action == "open":
+            for i, pid in enumerate(ids):
+                self._open(Path(self.catalog[pid]["path"]), activate=i == len(ids) - 1)
+            return
+        if action == "reveal":
+            if ids and not self.catalog[ids[0]]["missing"]:
+                _reveal_in_file_manager(Path(self.catalog[ids[0]]["path"]))
+            return
+        if action == "sync":
+            self._sync_zotero()
+            return
+        if action == "add_files":
+            await self._add_files(collection)
+            return
+        if action == "delete_collection":
+            self._confirm_delete_collection(collection)
+            return
+        if action == "add":
+            for pid in ids:  # Zotero papers become local papers once added
+                entry = self.catalog[pid]
+                self.library.record(Path(entry["path"]), entry["title"], entry["authors"], entry["year"])
+            self.library.add(ids, collection)
+        elif action == "remove_from_collection" and collection:
+            self.library.remove_from_collection(ids, collection)
+        elif action == "remove":
+            self.library.remove_from_library(ids)
+        elif action == "forget":
+            self.library.forget_opened(ids)
+        elif action == "new_collection":
+            parent = args.get("parent") if isinstance(args.get("parent"), str) else None
+            self.library.create_collection(str(args.get("id") or ""), name, parent)
+        elif action == "rename_collection" and collection:
+            self.library.rename_collection(collection, name)
+        elif action == "move_collection" and collection:
+            parent = args.get("parent") if isinstance(args.get("parent"), str) else None
+            if not self.library.move_collection(collection, parent):
+                ui.notify("A collection can't be moved into itself.", type="warning")
+        else:
+            return
+        self._save_library()
+
+    async def _add_files(self, collection: str | None) -> None:
+        paths = await app.native.main_window.create_file_dialog(
+            allow_multiple=True,
+            file_types=("Papers (" + ";".join(f"*{s}" for s in pipeline.SUPPORTED_INPUTS) + ")", "All files (*.*)"),
+        )
+        ids = []
+        for path in paths or []:
+            path = Path(path).resolve()
+            title, authors = path.stem, []
+            if path.suffix.lower() == ".pdf":
+                try:
+                    _, meta_title, authors = _pdf_info(path)
+                    title = meta_title or title
+                except (OSError, pdfium.PdfiumError):
+                    pass
+            ids.append(self.library.record(path, title, authors))
+        if ids:
+            self.library.add(ids, collection)
+            self._save_library()
+
+    def _confirm_delete_collection(self, cid: str | None) -> None:
+        if cid not in self.library.collections:
+            return
+        inner = len(self.library.descendants(cid)) - 1
+        with ui.dialog() as dialog, ui.card().classes("p2a-dialog"):
+            ui.label(f"Delete the collection “{self.library.collections[cid]['name']}”"
+                     + (f" and the {inner} collection{'s' * (inner > 1)} in it?" if inner else "?"))
+            ui.label("The papers stay in your library, and the files aren't touched.").classes("p2a-hint")
+
+            def delete() -> None:
+                dialog.close()
+                self.library.delete_collection(cid)
+                self._save_library()
+
+            with ui.element("div").classes("p2a-actions"):
+                ui.html("Cancel", tag="button", sanitize=False).classes("p2a-push").on("click", dialog.close)
+                ui.html("Delete", tag="button", sanitize=False).classes("p2a-push p2a-danger").on("click", delete)
+        dialog.open()
+
+    # --- Zotero --------------------------------------------------------------------------
+
+    def _sync_zotero(self) -> None:
+        if (self.defaults.zotero_dir or "").lower() == "none":
+            return
+        if self.zotero_loader and self.zotero_loader.is_alive():
+            return
+        self.zotero_loader = threading.Thread(target=self._load_zotero, daemon=True)
+        self.zotero_loader.start()
+
+    def _load_zotero(self) -> None:
+        """Runs in a background thread."""
+        found = zotero.find(self.defaults.zotero_dir)
+        if found is None:
+            self.events.put(("zotero", None, 0.0, ""))  # no Zotero: the library view leaves it out
+            return
+        mtime = zotero.database_mtime(found[0])
+        try:
+            snapshot = zotero.read(*found)
+        except (OSError, sqlite3.Error) as e:
+            self.events.put(("zotero", None, mtime, f"Couldn't read the Zotero library: {e}"))
+            return
+        status = f"{snapshot.missing} paper{'s' * (snapshot.missing != 1)} without a downloaded PDF not shown" \
+            if snapshot.missing else ""
+        self.events.put(("zotero", snapshot, mtime, status))
+
+    def _check_zotero(self) -> None:
+        """Read Zotero's library again when it changed, while the Library tab is shown."""
+        snapshot = self.zotero_snapshot
+        if self.active is None and snapshot and zotero.database_mtime(snapshot.data_dir) != self.zotero_mtime:
+            self._sync_zotero()
 
     # --- opening by arXiv ID, DOI or URL --------------------------------------------------
 
@@ -593,8 +923,7 @@ class PaperApp:
                     return
                 self.fetch_status.set_text("Looking up…")
                 _set_disabled(open_button, True)
-                self.fetcher = threading.Thread(target=self._fetch, args=(source,), daemon=True)
-                self.fetcher.start()
+                self._start_fetch(source)
 
             with ui.element("div").classes("p2a-actions"):
                 ui.html("Cancel", tag="button", sanitize=False).classes("p2a-push").on("click", dialog.close)
@@ -604,6 +933,14 @@ class PaperApp:
         dialog.on("hide", lambda: setattr(self, "fetch_status", None))
         dialog.open()
         ui.run_javascript("setTimeout(() => document.querySelector('.p2a-report input[type=text]')?.focus(), 100)")
+
+    def _start_fetch(self, source: str) -> None:
+        if self.fetcher and self.fetcher.is_alive():
+            return
+        if self.fetch_status is None:
+            ui.notify(f"Downloading {source}…")
+        self.fetcher = threading.Thread(target=self._fetch, args=(source,), daemon=True)
+        self.fetcher.start()
 
     def _fetch(self, source: str) -> None:
         """Runs in a background thread: download the paper, then open it."""
@@ -616,11 +953,15 @@ class PaperApp:
 
     def _set_output(self, value: str) -> None:
         self.output_value = value
+        if self.active is not None:
+            self.active.output = value
         self.output_input.props["value"] = value
         self.output_input.update()
 
     def _output_changed(self, event) -> None:
         self.output_value = event.args
+        if self.active is not None:
+            self.active.output = event.args
 
     def _section_changed(self, name: str, checked) -> None:
         (self.sections.add if checked else self.sections.discard)(name)
@@ -735,8 +1076,9 @@ class PaperApp:
             f"- Voice: {self.voice_select.value}; speed: {self.speed_select.value}; "
             f"language model: {self.model_select.value or 'automatic'}",
             f"- Sections: {', '.join(sorted(self.sections))}",
-            f"- Input type: {self.input_path.suffix if self.input_path else 'none'}"
-            f"{' (downloaded)' if self.input_source else ''}",
+            f"- Input type: {self.active.path.suffix if self.active else 'none'}"
+            f"{' (downloaded)' if self.active and self.active.source else ''}",
+            f"- Open tabs: {len(self.tabs)}",
         ]
         missing = [r.title for r in self.requirements if not r.installed]
         if missing:
@@ -746,9 +1088,11 @@ class PaperApp:
             text += "\n\n<details><summary>Conversion log</summary>\n\n```\n" + "\n".join(self.log_lines[-40:]) + "\n```\n</details>"
         return text.replace(str(Path.home()), "~")
 
-    def _reveal(self) -> None:
-        if self.output_path:
-            _reveal_in_file_manager(self.output_path)
+    def _reveal(self, event) -> None:
+        """Show the audio file the player has loaded (it may be another tab's, still playing)."""
+        path = _audio_files.get(str(event.args))
+        if path is not None and path.is_file():
+            _reveal_in_file_manager(path)
 
     # --- conversion --------------------------------------------------------------------
 
@@ -759,7 +1103,7 @@ class PaperApp:
             _set_disabled(self.convert_button, True)
             return
         output_path = Path(self.output_value or "").expanduser()
-        error = self._validate(self.input_path, output_path)
+        error = self._validate(self.active.path if self.active else None, output_path)
         if error:
             ui.notify(error, type="warning")
         elif output_path.exists():
@@ -778,19 +1122,21 @@ class PaperApp:
 
     def _start(self, output_path: Path) -> None:
         settings = self._settings()
+        if self.active is None:
+            return
         self.output_path = output_path
+        self.converting = tab = self.active
+        tab.status, tab.progress = "", 0.0
         self.cancel.clear()
         self.log_lines = []
         self.log.set_text("")
-        self._set_progress(0)
-        self.output_section.element.set_visibility(False)
         self.worker = threading.Thread(
             target=self._run,
-            args=(self.input_path, output_path, settings),
+            args=(tab.path, output_path, settings),
             daemon=True,
         )
         self.worker.start()
-        self._update_state()
+        self._render_pane()
 
     @staticmethod
     def _validate(input_path: Path | None, output_path: Path) -> str | None:
@@ -858,37 +1204,46 @@ class PaperApp:
         if kind == "fetched":
             if self.fetch_status:
                 self.fetch_dialog.close()
-            self._set_input(*args)
+            self._open(*args)
+            return
+        if kind == "zotero":
+            self.zotero_snapshot, self.zotero_mtime, self.zotero_status = args
+            self._push_library()
+            return
+        tab = self.converting
+        if tab is None:
             return
         if kind == "progress":
             message, fraction = args
             self._log(message)
             if not message.startswith(" "):  # indented lines are details, keep the main status
-                self.status.set_text(message)
+                tab.status = message
             if fraction is not None:
-                self._set_progress(fraction)
+                tab.progress = fraction
+            self._render_status()
             return
         self.worker = None
         if kind == "done":
-            self._set_progress(1)
             whole_minutes, seconds = divmod(round(args[0] * 60), 60)
-            self.status.set_text(f"Done: {whole_minutes}:{seconds:02d} of audio.")
-            token = secrets.token_urlsafe(8)
-            _audio_files.clear()
-            _audio_files[token] = self.output_path
-            self.player.props["src"] = f"/audio/{token}"
-            self.player.update()
-            self.output_section.element.set_visibility(True)
+            tab.status, tab.progress = f"Done: {whole_minutes}:{seconds:02d} of audio.", 1.0
+            if tab.audio:
+                _audio_files.pop(tab.audio, None)
+            tab.audio = secrets.token_urlsafe(8)
+            _audio_files[tab.audio] = self.output_path
+            self.library.set_audio(tab.path, self.output_path)
+            self._save_library()
+            if tab is not self.active:
+                ui.notify(f"Finished “{tab.title}”: {self.output_path.name}")
         elif kind == "cancelled":
-            self._set_progress(0)
-            self.status.set_text("Stopped.")
+            tab.status, tab.progress = "Stopped.", 0.0
             self._log("Stopped.")
         elif kind == "error":
-            self.status.set_text("Failed.")
+            tab.status = "Failed."
             self._log(f"Error: {args[0]}")
-            ui.notify(f"Conversion failed: {args[0]}", type="negative", multi_line=True,
+            ui.notify(f"Converting “{tab.title}” failed: {args[0]}", type="negative", multi_line=True,
                       timeout=0, close_button=True)
-        self._update_state()
+        self.converting = None
+        self._render_pane()
 
     def _busy(self) -> bool:
         return self.worker is not None and self.worker.is_alive()
@@ -995,7 +1350,10 @@ class PaperApp:
 SHORTCUTS = [
     ("Open a paper", f"{_MOD}O"),
     ("Open from arXiv, DOI or URL", f"{_SHIFT_MOD}O"),
-    ("Close the window", f"{_MOD}W"),
+    ("Find a paper and open it", f"{_MOD}K"),
+    ("Close the tab (on the Library: the window)", f"{_MOD}W"),
+    ("Next / previous tab", "⌃Tab  ⌃⇧Tab"),
+    ("Library / first, second… tab", f"{_MOD}1  {_MOD}2  …  {_MOD}9"),
     ("Convert to audio / stop", f"{_MOD}↩"),
     ("Zoom in / out / fit width", f"{_MOD}+  {_MOD}−  {_MOD}0"),
     ("Zoom smoothly", f"pinch  or  {_MOD}scroll"),
@@ -1044,6 +1402,32 @@ def _issue_url(title: str, body: str, diagnostics: str) -> str:
         else:
             body = body[: len(body) * 2 // 3] + "\n…(shortened)"
     return build("", "")
+
+
+def _pdf_info(path: Path) -> tuple[list, str, list[str]]:
+    """A PDF's page sizes, and its title and authors' last names if its metadata has them."""
+    with _pdfium_lock:
+        pdf = pdfium.PdfDocument(path)
+        try:
+            sizes = [list(pdf[i].get_size()) for i in range(len(pdf))]
+            metadata = pdf.get_metadata_dict()
+        finally:
+            pdf.close()
+    title = (metadata.get("Title") or "").strip()
+    return sizes, title if 3 <= len(title) <= 200 else "", _last_names(metadata.get("Author") or "")
+
+
+def _last_names(authors: str) -> list[str]:
+    """'Ashish Vaswani; Noam Shazeer and Niki Parmar' -> ['Vaswani', 'Shazeer', 'Parmar']."""
+    names = [n.strip() for n in re.split(r";|\band\b|&", authors) if n.strip()]
+    if len(names) == 1 and names[0].count(",") >= 2:  # 'A. Vaswani, N. Shazeer, N. Parmar'
+        names = [n.strip() for n in names[0].split(",") if n.strip()]
+    result = []
+    for name in names[:50]:
+        last = name.split(",")[0] if "," in name else name.split()[-1]  # 'Vaswani, Ashish' or 'Ashish Vaswani'
+        if 1 < len(last) <= 60:
+            result.append(last.strip())
+    return result
 
 
 def _default_output(path: Path, title: str, downloaded: bool) -> Path:
