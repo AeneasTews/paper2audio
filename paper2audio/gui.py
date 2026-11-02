@@ -41,6 +41,7 @@ except ImportError as e:  # GUI extras are optional; the CLI works without them
 
 from . import annotations, audio, config, document, hardware, models, pipeline, requirements, server, tts, zotero
 from . import library as library_store
+from .intro import Intro
 from .setup_dialog import SetupDialog
 
 READER_DIR = Path(__file__).parent / "reader"
@@ -273,6 +274,7 @@ TOP_HTML = f"""
     </button>
   </div>
   <div class="p2a-toolbar-group">
+    {_button("emit-intro", "circle-help", "Introduction: features, models and requirements", needs_pdf=False)}
     {_button("emit-shortcuts", "keyboard", f"Keyboard shortcuts ({_MOD}/)", needs_pdf=False)}
     {_button("emit-report", "bug", "Report an issue", needs_pdf=False)}
     {_button("emit-setup", "wrench", "Check and install ollama and models", needs_pdf=False)}
@@ -328,6 +330,7 @@ LIBRARY_HTML = f"""
     {_button("lib-add-files", "file-plus", "Add papers to the library…", needs_pdf=False)}
     {_button("lib-sync", "refresh-cw", "Reload the Zotero library", needs_pdf=False)}
     <div class="p2a-grow"></div>
+    {_button("emit-intro", "circle-help", "Introduction: features, models and requirements", needs_pdf=False)}
     <label class="p2a-search">{icon("search")}<input id="p2a-lib-search" type="text" placeholder="Filter by title, author, year"></label>
   </div>
   <div class="p2a-lib-main">
@@ -494,6 +497,8 @@ class PaperApp:
                 self._build_pane()
             ui.html(LIBRARY_HTML, sanitize=False).style("display: contents")
         self.setup = SetupDialog(on_installed=self._refresh_options)
+        self.intro = Intro(icon, on_close=self._intro_closed)
+        self.setup_after_intro = False
         ui.on("p2a_open", self._choose_input)
         ui.on("p2a_open_remote", self._show_open_remote)
         ui.on("p2a_setup", self._open_setup)
@@ -502,6 +507,7 @@ class PaperApp:
         ui.on("p2a_shortcuts", _show_shortcuts)
         ui.on("p2a_report", self._show_report)
         ui.on("p2a_reveal", self._reveal)
+        ui.on("p2a_intro", self.intro.show)
         ui.on("p2a_notify", lambda e: ui.notify(e.args, type="warning"))
         ui.on("p2a_tab", lambda e: self._activate(e.args, from_reader=True))
         ui.on("p2a_tab_close", lambda e: self._close_tab(e.args))
@@ -603,7 +609,10 @@ class PaperApp:
             self._open(Path(path), activate=i == len(paths) - 1)
 
     def _startup(self) -> None:
-        """Show the library, reopen the tabs of last time, and read Zotero's library."""
+        """Show the library, reopen the tabs of last time, and read Zotero's library.
+        The first time, also the introduction."""
+        if not self.library.intro_seen:
+            self.intro.show()
         self._push_library()
         session = self.library.session
         for path in session["tabs"]:
@@ -1287,6 +1296,14 @@ class PaperApp:
         if not self._loading_options():
             self._refresh_options()
 
+    def _intro_closed(self) -> None:
+        if not self.library.intro_seen:
+            self.library.intro_seen = True
+            self._save_library(push=False)
+        if self.setup_after_intro:
+            self.setup_after_intro = False
+            self.setup.show(self.requirements)
+
     def _refresh_options(self) -> None:
         """Check the setup and ask ollama for language models and phonon's voices, in the background."""
         if self._loading_options() or self._busy():
@@ -1330,7 +1347,10 @@ class PaperApp:
         if self.setup.is_open or self.open_setup_after_load or (missing and not self.setup_prompted):
             self.setup_prompted = True
             self.open_setup_after_load = False
-            self.setup.show(reqs)
+            if self.intro.is_open:
+                self.setup_after_intro = True  # the introduction ends by pointing to it
+            else:
+                self.setup.show(reqs)
 
         voices = voices or [self.defaults.voice]  # the configured voice, if listing failed
         self.voice_select.set_options(voices, _pick(voices, self.voice_select.value, self.defaults.voice))

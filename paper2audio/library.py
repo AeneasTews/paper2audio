@@ -39,6 +39,7 @@ class Library:
         self.papers: dict[str, dict] = {}  # id: {path, title, authors, year, source, added, opened, collections, audio}
         self.collections: dict[str, dict] = {}  # id: {name, parent}
         self.session: dict = {"tabs": [], "active": None}  # open tabs, as paths, to restore them
+        self.intro_seen = False  # the GUI's introduction was shown
         self.load()
 
     # --- storage -----------------------------------------------------------------------
@@ -74,6 +75,7 @@ class Library:
                 collection["parent"] = None
         for paper in self.papers.values():
             paper["collections"] = [c for c in paper["collections"] if c in self.collections]
+        self.intro_seen = data.get("intro_seen") is True
         session = data.get("session")
         if isinstance(session, dict):
             tabs = [t for t in session.get("tabs") or [] if isinstance(t, str)]
@@ -83,7 +85,8 @@ class Library:
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         content = json.dumps({"version": 1, "papers": self.papers, "collections": self.collections,
-                              "session": self.session}, ensure_ascii=False, indent=1)
+                              "session": self.session, "intro_seen": self.intro_seen},
+                             ensure_ascii=False, indent=1)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent, delete=False, suffix=".tmp") as f:
             f.write(content)
         os.replace(f.name, self.path)
