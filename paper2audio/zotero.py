@@ -5,6 +5,9 @@ PDFs in its storage/ folder or, for linked files, wherever they are. While Zoter
 holds an exclusive lock on the database, so it's copied to a temporary folder first and
 read from there. Zotero itself is never changed.
 
+The annotations made in Zotero's PDF reader are read too (highlights, underlines, notes and
+image selections; ink drawings are left out), so the GUI can show them next to its own.
+
 The data directory is found in the Zotero profile's prefs.js; config.toml's `zotero_dir`
 overrides it.
 """
@@ -42,6 +45,24 @@ class Snapshot:
     collections: list[tuple[int, str, int | None, int]]  # (collectionID, name, parentID, libraryID)
     items: list[Item]
     missing: int  # items whose PDF isn't on this computer (e.g. not downloaded yet)
+    annotations: dict[str, list["Annotation"]] = field(default_factory=dict)  # by the PDF's path
+
+
+@dataclass(frozen=True)
+class Annotation:
+    """An annotation as Zotero stores it. Positions are in PDF points, from the bottom left."""
+    key: str
+    type: str           # "highlight", "underline", "note", "text" or "image"
+    color: str
+    text: str           # the highlighted text
+    comment: str
+    page: int           # page index
+    rects: tuple[tuple[float, float, float, float], ...]  # (x1, y1, x2, y2)
+    created: str        # ISO 8601, UTC
+
+
+# itemAnnotations.type; 4 (ink) isn't shown
+ANNOTATION_TYPES = {1: "highlight", 2: "note", 3: "image", 5: "underline", 6: "text"}
 
 
 def _profiles_dir() -> Path:
@@ -146,6 +167,7 @@ def _read(db: sqlite3.Connection, data_dir: Path, base_dir: Path | None) -> Snap
 
     # The first PDF of each item that's on this computer. Standalone PDFs are items themselves.
     pdfs: dict[int, Path] = {}
+    attachment_paths: dict[int, Path] = {}  # every PDF on this computer, for its annotations
     missing = set()
     rows = db.execute(f"""
         SELECT a.itemID, a.parentItemID, a.linkMode, a.path, i.key, i.libraryID
@@ -156,11 +178,15 @@ def _read(db: sqlite3.Connection, data_dir: Path, base_dir: Path | None) -> Snap
         ORDER BY a.itemID""")
     for attachment_id, parent_id, link_mode, stored, attachment_key, library_id in rows:
         item_id = parent_id or attachment_id
-        if item_id in pdfs or library_id not in library_ids or not stored:
+        if library_id not in library_ids or not stored:
             continue
         path = _attachment_path(stored, link_mode, attachment_key, data_dir, base_dir)
         if path is None or not path.is_file():
-            missing.add(item_id)
+            if item_id not in pdfs:
+                missing.add(item_id)
+            continue
+        attachment_paths[attachment_id] = path
+        if item_id in pdfs:
             continue
         missing.discard(item_id)
         pdfs[item_id] = path
@@ -202,7 +228,31 @@ def _read(db: sqlite3.Connection, data_dir: Path, base_dir: Path | None) -> Snap
             path=path,
             collections=in_collections.get(item_id, []),
         ))
-    return Snapshot(data_dir, libraries, collections, items, len(missing))
+    annotations = _annotations(db, attachment_paths, deleted_items) if "itemAnnotations" in tables else {}
+    return Snapshot(data_dir, libraries, collections, items, len(missing), annotations)
+
+
+def _annotations(db: sqlite3.Connection, attachment_paths: dict[int, Path], deleted_items: str) -> dict[str, list[Annotation]]:
+    result: dict[str, list[Annotation]] = {}
+    for attachment_id, kind, key, color, text, comment, position, added in _chunked(db, f"""
+            SELECT a.parentItemID, a.type, i.key, a.color, a.text, a.comment, a.position, i.dateAdded
+            FROM itemAnnotations a JOIN items i ON i.itemID = a.itemID
+            WHERE a.parentItemID IN ({{}}) AND a.itemID NOT IN ({deleted_items})
+            ORDER BY a.parentItemID, a.sortIndex""", list(attachment_paths)):
+        if kind not in ANNOTATION_TYPES:
+            continue
+        try:
+            place = json.loads(position)
+            page = int(place["pageIndex"])
+            rects = tuple(tuple(float(v) for v in r[:4]) for r in place.get("rects") or [] if len(r) >= 4)
+        except (TypeError, ValueError, KeyError):
+            continue
+        if not rects:
+            continue
+        result.setdefault(str(attachment_paths[attachment_id]), []).append(Annotation(
+            key=key, type=ANNOTATION_TYPES[kind], color=color or "", text=text or "", comment=comment or "",
+            page=page, rects=rects, created=(added or "").replace(" ", "T") + "Z" if added else ""))
+    return result
 
 
 def _attachment_path(stored: str, link_mode: int, key: str, data_dir: Path, base_dir: Path | None) -> Path | None:

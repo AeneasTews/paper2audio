@@ -478,7 +478,7 @@
 
   function remove(id) {
     const annotation = state.annotations.find((a) => a.id === id);
-    if (!annotation) return;
+    if (!annotation || annotation.zotero) return;  // Zotero's are changed in Zotero
     state.annotations = state.annotations.filter((a) => a.id !== id);
     if (state.selected === id) state.selected = null;
     renderMarks(annotation.page);
@@ -488,7 +488,7 @@
 
   function recolor(id, color) {
     const annotation = state.annotations.find((a) => a.id === id);
-    if (!annotation) return;
+    if (!annotation || annotation.zotero) return;
     annotation.color = color;
     renderMarks(annotation.page);
     renderSidebar();
@@ -503,9 +503,25 @@
   function saveNow(tab) {
     tab.saveTimer = null;
     fetch(`/annotations/${tab.doc.token}`, {
-      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(tab.annotations),
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(tab.annotations.filter((a) => !a.zotero)),
     }).then((r) => { if (!r.ok) throw new Error(r.statusText); })
       .catch((e) => notify(`Couldn't save annotations: ${e.message}`));
+  }
+
+  // Annotations made in Zotero come with the paper's own (marked `zotero`, read-only). When
+  // Zotero's change, Python calls this to fetch them again for the open papers.
+  function refreshZotero() {
+    for (const tab of tabs) {
+      const doc = tab.doc;
+      if (!doc) continue;
+      fetch(`/annotations/${doc.token}`).then((r) => r.json()).then((list) => {
+        if (tab.doc !== doc) return;
+        tab.annotations = [...tab.annotations.filter((a) => !a.zotero), ...list.filter((a) => a.zotero)];
+        if (!tab.annotations.some((a) => a.id === tab.selected)) tab.selected = null;
+        renderAllMarks(tab);
+        if (state === tab) renderSidebar();
+      }).catch(() => {});
+    }
   }
 
   // --- drawing annotations on the pages ---------------------------------------------------
@@ -660,16 +676,34 @@
       card.dataset.id = a.id;
       const head = el("div", "p2a-card-head", `<span style="color:${a.color}">${icon(TYPE_ICON[a.type])}</span>`);
       head.append(el("span", "p2a-grow", `Page ${a.page + 1}`));
-      const del = el("button", "p2a-btn", icon("trash-2"));
-      del.title = "Delete";
-      del.addEventListener("click", (e) => { e.stopPropagation(); remove(a.id); });
-      head.append(del);
+      if (a.zotero) {
+        const badge = el("span", "p2a-badge", "Zotero");
+        badge.title = "Made in Zotero: change or delete it there";
+        head.append(badge);
+      } else {
+        const del = el("button", "p2a-btn", icon("trash-2"));
+        del.title = "Delete";
+        del.addEventListener("click", (e) => { e.stopPropagation(); remove(a.id); });
+        head.append(del);
+      }
       card.append(head);
       if (a.type !== "note" && a.text) {
         const quote = el("div", "p2a-card-text");
         quote.textContent = a.text;
         quote.style.borderColor = a.color;
         card.append(quote);
+      }
+      if (a.zotero) {
+        if (a.comment) {
+          const comment = el("div", "p2a-card-comment");
+          comment.textContent = a.comment;
+          card.append(comment);
+        } else if (a.type !== "note" && a.text) {
+          card.lastChild.style.marginBottom = "7px";
+        }
+        card.addEventListener("click", () => select(a.id, { scrollPage: true }));
+        body.append(card);
+        continue;
       }
       const comment = el("div", "p2a-card-comment");
       comment.contentEditable = "true";
@@ -1723,7 +1757,7 @@
   document.documentElement.classList.add("p2a-mode-library");  // until Python shows a tab
 
   window.P2A = {
-    openTab, activate, setLibrary, setAudio, setZoom, zoomStep, goToPage, setTool, setColor,
+    openTab, activate, setLibrary, setAudio, refreshZotero, setZoom, zoomStep, goToPage, setTool, setColor,
     get state() { return state; },
     get tabs() { return tabs; },
   };

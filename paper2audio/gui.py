@@ -166,10 +166,63 @@ def _outline(token: str) -> list:
     return items
 
 
+# Annotations made in Zotero, by the PDF's path; read-only, shown next to the reader's own.
+_zotero_annotations: dict[str, list[zotero.Annotation]] = {}
+
+
 @app.get("/annotations/{token}")
 def _get_annotations(token: str) -> list:
     document = _document(token)
-    return annotations.load(document.annotation_id) if document.annotation_id else []
+    if not document.annotation_id:
+        return []
+    own = annotations.load(document.annotation_id)
+    from_zotero = _zotero_annotations.get(str(document.path))
+    if from_zotero:
+        try:
+            own += _convert_zotero(document.path, document.path.stat().st_mtime, tuple(from_zotero))
+        except (OSError, pdfium.PdfiumError):
+            pass
+    return own
+
+
+@lru_cache(maxsize=32)
+def _convert_zotero(path: Path, mtime: float, items: tuple[zotero.Annotation, ...]) -> list[dict]:
+    """Zotero's annotations in the reader's form: positions as fractions of the page, from the top left."""
+    with _pdfium_lock:
+        pdf = pdfium.PdfDocument(path)
+        try:
+            boxes = {}
+            for index in {a.page for a in items if 0 <= a.page < len(pdf)}:
+                page = pdf[index]
+                boxes[index] = (page.get_cropbox(), page.get_rotation())
+        finally:
+            pdf.close()
+
+    def corners(index: int, x1: float, y1: float, x2: float, y2: float) -> tuple[float, float, float, float]:
+        (left, bottom, right, top), rotation = boxes[index]
+        width, height = (right - left) or 1, (top - bottom) or 1
+        points = []
+        for x, y in ((x1, y1), (x2, y2)):
+            u, v = (x - left) / width, (top - y) / height  # unrotated, from the top left
+            points.append({90: (1 - v, u), 180: (1 - u, 1 - v), 270: (v, 1 - u)}.get(rotation % 360, (u, v)))
+        (a, b), (c, d) = points
+        return min(a, c), min(b, d), abs(c - a), abs(d - b)
+
+    result = []
+    for a in items:
+        if a.page not in boxes:
+            continue
+        color = a.color if annotations.COLOR.fullmatch(a.color) else annotations.DEFAULT_COLOR
+        common = {"id": f"zotero-{a.key}", "zotero": True, "color": color, "page": a.page,
+                  "text": a.text, "comment": a.comment, "created": a.created}
+        if a.type in ("note", "text"):  # a note, or text typed onto the page: shown as a note
+            x, y, _, _ = corners(a.page, a.rects[0][0], a.rects[0][3], a.rects[0][0], a.rects[0][3])
+            result.append({**common, "type": "note", "position": [x, y],
+                           "comment": a.comment or a.text, "text": ""})
+        else:  # highlight, underline, or an image selection (shown as a highlighted area)
+            result.append({**common, "type": "underline" if a.type == "underline" else "highlight",
+                           "rects": [list(corners(a.page, *r)) for r in a.rects]})
+    return result
 
 
 @app.put("/annotations/{token}")
@@ -177,6 +230,7 @@ def _put_annotations(token: str, body: list = Body(...)) -> dict:
     document = _document(token)
     if not document.annotation_id:
         raise HTTPException(400, "annotations are only stored for PDFs")
+    body = [a for a in body if not (isinstance(a, dict) and a.get("zotero"))]  # Zotero's own aren't copied
     try:
         annotations.save(document.annotation_id, body, document.path.name)
     except (OSError, ValueError) as e:
@@ -912,9 +966,14 @@ class PaperApp:
         self.events.put(("zotero", snapshot, mtime, status))
 
     def _check_zotero(self) -> None:
-        """Read Zotero's library again when it changed, while the Library tab is shown."""
+        """Read Zotero's library again when it changed, while the Library tab or one of
+        Zotero's papers is shown (for its annotations)."""
         snapshot = self.zotero_snapshot
-        if self.active is None and snapshot and zotero.database_mtime(snapshot.data_dir) != self.zotero_mtime:
+        tab = self.active
+        if not snapshot or zotero.database_mtime(snapshot.data_dir) == self.zotero_mtime:
+            return
+        if tab is None or (self.catalog.get(tab.id) or {}).get("zotero") is not None \
+                or str(tab.path) in _zotero_annotations:
             self._sync_zotero()
 
     # --- opening by arXiv ID, DOI or URL --------------------------------------------------
@@ -1308,6 +1367,11 @@ class PaperApp:
             return
         if kind == "zotero":
             self.zotero_snapshot, self.zotero_mtime, self.zotero_status = args
+            found = self.zotero_snapshot.annotations if self.zotero_snapshot else {}
+            if found != _zotero_annotations:
+                _zotero_annotations.clear()
+                _zotero_annotations.update(found)
+                ui.run_javascript("P2A.refreshZotero()")  # open papers show the changes
             self._push_library()
             return
         tab = self.converting

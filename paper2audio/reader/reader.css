@@ -142,6 +142,10 @@ body { -webkit-user-select: none; user-select: none; cursor: default; }
 .p2a-card-head .p2a-grow { flex: 1; }
 .p2a-card-head .p2a-btn { min-width: 22px; height: 22px; padding: 0 3px; }
 .p2a-card-head .p2a-btn .p2a-icon { width: 13px; height: 13px; }
+.p2a-badge {
+  font-size: 10.5px; padding: 1px 6px; border-radius: 8px; margin-right: 2px;
+  background: var(--p2a-border-soft); color: var(--p2a-text-2);
+}
 .p2a-card-text {
   margin: 7px 8px 0; padding: 0 0 0 8px; border-left: 2px solid; white-space: pre-wrap;
   display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden;
