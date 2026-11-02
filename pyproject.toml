@@ -2,11 +2,22 @@
 name = "paper2audio"
 version = "0.1.0"
 description = "Turn scientific papers (PDF) into audio files using ollama's phonon"
-requires-python = ">=3.10"
-dependencies = ["pypdf>=5", "lameenc>=1.7", "pillow>=10"]
+requires-python = ">=3.11"  # tomllib
+dependencies = [
+    "pypdf>=5",
+    "pillow>=10",
+    "pypdfium2>=5.14.0",
+    "av>=18.1.0",
+    "beautifulsoup4>=4.15.0",
+    "pylatexenc>=2.11",
+]
+
+[project.optional-dependencies]
+gui = ["nicegui>=2.10", "pywebview>=5"]
 
 [project.scripts]
 paper2audio = "paper2audio.cli:main"
+paper2audio-gui = "paper2audio.gui:main"
 
 [build-system]
 requires = ["hatchling"]

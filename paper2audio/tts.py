@@ -2,11 +2,13 @@
 
 import io
 import subprocess
-import sys
 import wave
 from dataclasses import dataclass
 
+from .progress import Progress, print_progress
+
 MODEL = "phonon"
+DEFAULT_VOICE = "Zoey"
 # phonon handles long inputs, but chunking gives progress output and means one bad
 # chunk doesn't throw away all the audio synthesized so far.
 MAX_CHUNK_CHARS = 4000
@@ -19,13 +21,13 @@ class Audio:
     channels: int
 
 
-def synthesize(text: str, voice: str) -> Audio:
+def synthesize(text: str, voice: str, progress: Progress = print_progress) -> Audio:
     chunks = _chunk(text)
     pcm = bytearray()
     params = None
     for i, chunk in enumerate(chunks, 1):
-        print(f"Speaking chunk {i}/{len(chunks)}...", file=sys.stderr)
-        wav_bytes = _run_phonon(chunk, voice)
+        progress(f"Speaking chunk {i}/{len(chunks)}...", (i - 1) / len(chunks))
+        wav_bytes = _run_phonon(chunk, voice, progress)
         if wav_bytes is None:
             continue
         with wave.open(io.BytesIO(wav_bytes)) as w:
@@ -42,7 +44,7 @@ def synthesize(text: str, voice: str) -> Audio:
     return Audio(bytes(pcm), sample_rate=params[0], channels=params[1])
 
 
-def _run_phonon(text: str, voice: str) -> bytes | None:
+def _run_phonon(text: str, voice: str, progress: Progress) -> bytes | None:
     result = subprocess.run(
         ["ollama", "run", MODEL, "--voice", voice],
         input=text.encode(),
@@ -51,7 +53,7 @@ def _run_phonon(text: str, voice: str) -> bytes | None:
     if result.returncode != 0:
         error = result.stderr.decode(errors="replace").strip()
         if "no text to speak" in error:
-            print(f"  skipped (phonon: {error})", file=sys.stderr)
+            progress(f"  skipped (phonon: {error})", None)
             return None
         raise RuntimeError(f"phonon failed: {error}")
     return result.stdout
