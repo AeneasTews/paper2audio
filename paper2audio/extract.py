@@ -30,7 +30,8 @@ def _pdfium_text(pdf_path: Path, page_index: int) -> str:
     try:
         textpage = pdf[page_index].get_textpage()
         text = textpage.get_text_range().replace("\r\n", "\n").replace("\r", "\n")
-        return text.replace("\ufffe", "").replace("\x02", "")  # hyphens at line ends: join the word
+        text = text.replace("\ufffe\n", "").replace("\x02\n", "")  # hyphens at line ends: join the word
+        return text.replace("\ufffe", "").replace("\x02", "")
     finally:
         pdf.close()
 
