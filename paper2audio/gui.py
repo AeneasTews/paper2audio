@@ -45,6 +45,8 @@ from .intro import Intro
 from .setup_dialog import SetupDialog
 
 READER_DIR = Path(__file__).parent / "reader"
+APP_NAME = "paper2audio"
+APP_ICON = Path(__file__).parent / "assets" / "icon.png"  # drawn by tools/make_icon.py
 MAX_RENDER_WIDTH = 8192  # pixels; enough for 400% zoom on a Retina screen
 SPEEDS = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
 NO_MODEL = "none"  # the rule-based cleanup, without a language model
@@ -1668,9 +1670,11 @@ def main() -> None:
     # pywebview disables text selection by default (it injects `user-select: none`); the
     # reader needs it for selecting and annotating PDF text.
     app.native.window_args["text_select"] = True
+    app.native.start_args["icon"] = str(APP_ICON)  # the Dock icon on macOS, the window icon on Linux
     ui.run(
         native=True,  # a desktop window, not a browser tab; also binds to 127.0.0.1 only
-        title="paper2audio",
+        title=APP_NAME,
+        favicon=APP_ICON,  # the window icon on Windows
         window_size=(1500, 940),
         dark=None,  # follow the system's light/dark setting
         reload=False,
